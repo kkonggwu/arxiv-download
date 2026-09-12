@@ -443,6 +443,34 @@ class TestBilingualCache(unittest.TestCase):
         self._run(lambda text: "【译文】")
         self.assertEqual(self._cache()[PARA], "【译文】")
 
+    def test_cache_is_flushed_incrementally(self):
+        """中途中断不该丢掉已翻好的部分——每 20 段要落盘一次。"""
+        n = fp.CACHE_FLUSH_EVERY + 5
+        html = wrap("".join(f"<p>{PARA} index {i} trailing filler</p>"
+                            for i in range(n)))
+        calls = {"n": 0}
+
+        def flaky(text):
+            calls["n"] += 1
+            if calls["n"] > fp.CACHE_FLUSH_EVERY:
+                raise KeyboardInterrupt          # 模拟 Ctrl-C
+            return "【译文】"
+
+        with mock.patch.object(fp, "fetch_paper_html",
+                               return_value=(html, "test", "https://x/")), \
+             mock.patch.object(fp, "translate_one", side_effect=flaky), \
+             mock.patch("time.sleep"):
+            with self.assertRaises(KeyboardInterrupt):
+                fp.build_bilingual(self.PID, self.reg)
+
+        self.assertEqual(len(self._cache()), fp.CACHE_FLUSH_EVERY)
+
+    def test_nothing_retranslated_when_cache_is_warm(self):
+        self._run(lambda text: "【译文】")
+        with mock.patch.object(fp, "translate_one") as t:
+            self._run(lambda text: "【译文】")
+        self.assertFalse(t.called)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

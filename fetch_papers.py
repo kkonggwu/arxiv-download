@@ -283,6 +283,7 @@ BILINGUAL_DIR = OUTDIR / "双语"
 CACHE_DIR = BILINGUAL_DIR / ".cache"
 MIN_PARA_CHARS = 40  # 短于此的段落视为导航/噪声,丢弃
 FAIL_MARK = "⚠"      # 译文失败标记;带此标记的缓存条目会被视为未命中并重试
+CACHE_FLUSH_EVERY = 20  # 每翻译这么多段就把缓存落盘一次(见 build_bilingual)
 
 # ---- 翻译后端(由 --translator 或 TRANSLATE_BACKEND 选择)------------------
 # google: Google 免费网页接口(Chrome 划词词典用的通道),免认证、无需 Key,
@@ -909,6 +910,7 @@ def build_bilingual(arxiv_id: str, reg: dict) -> Path | None:
 
     只有成功的译文才写进缓存:失败的段落仅在本次渲染时标 ⚠,重跑会自动
     重试。表格、公式与原文块不进缓存(它们不参与翻译)。
+    缓存每 CACHE_FLUSH_EVERY 段增量落盘一次,中途中断不会丢掉已有进度。
     """
     known = {p["id"]: p for p in reg["papers"]}
     if arxiv_id in known:
@@ -962,6 +964,11 @@ def build_bilingual(arxiv_id: str, reg: dict) -> Path | None:
             failures[t] = str(e)
         if i % 10 == 0 or i == len(todo):
             log(f"  翻译进度 {i}/{len(todo)}")
+        if i % CACHE_FLUSH_EVERY == 0:
+            # 增量落盘:一篇 270 段的论文要跑好几分钟,中途中断(Ctrl-C、
+            # 断网、限流卡死)不该把已经翻好的部分全部丢掉。
+            cache_file.write_text(json.dumps(cache, ensure_ascii=False),
+                                  encoding="utf-8")
         time.sleep(0.4)  # 免费接口,温柔一点
 
     # 3) 标题单独翻一份,用 "TITLE::" 前缀存在同一个缓存里
