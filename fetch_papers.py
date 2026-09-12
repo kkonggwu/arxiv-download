@@ -411,12 +411,48 @@ def _graphic_src(tag: str, attrs: dict) -> str:
     return (src or "").strip()
 
 
+# LaTeXML 用同一套 h1–h6 标签承载所有层级的标题,靠 class 区分。直接按标签号
+# 映射会把 Abstract(h6) 变成六级标题,所以优先认 class,认不出才退回标签号。
+# ltx_title_document 是论文标题本身(正文里会再出现一次),直接丢掉。
+TITLE_LEVEL = {
+    "ltx_title_abstract": 2,          # h6,但语义上就是一级章节
+    "ltx_title_classification": 2,    # h6,keywords
+    "ltx_title_section": 2,           # h2  1 Introduction
+    "ltx_title_appendix": 2,          # h2  Appendix
+    "ltx_title_bibliography": 2,      # h2  References
+    "ltx_title_subsection": 3,        # h3  2.1 ...
+    "ltx_title_subsubsection": 4,     # h4  3.2.1 ...
+    "ltx_title_paragraph": 5,         # h5  无编号的段落式小标题
+}
+SKIP_TITLE_CLASS = "ltx_title_document"
+
+
+def heading_level(tag: str, attrs: dict) -> int | None:
+    """算出标题该用几级 Markdown;返回 None 表示这不是正文标题。
+
+    级别从 2 起(# 留给论文标题),上限 6。实测 2501.12948 有 86 个标题、
+    分属 5 个真实层级,压成清一色 `##` 后就完全看不出 3.2.1 属于 3.2 了。
+    """
+    classes = (attrs.get("class") or "").split()
+    if SKIP_TITLE_CLASS in classes:
+        return None
+    for cls in classes:
+        if cls in TITLE_LEVEL:
+            return TITLE_LEVEL[cls]
+    try:                      # 认不出 class 就退回标签号
+        level = int(tag[1])
+    except (IndexError, ValueError):
+        return 2
+    return min(6, max(2, level))
+
+
 class PaperHTMLParser(HTMLParser):
     """从 arXiv/ar5iv 的 HTML 中抽取标题、正文段落与表格。
 
     这是事件驱动的流式解析:HTMLParser 边扫标签边回调,我们不建 DOM 树。
     状态用四个实例变量维护:
-      _blocks  结果列表,("h"|"p"|"table"|..., 文本)
+      _blocks  结果列表,kind 为 "p"/"table"/"verbatim"/"formula"/"image",
+               标题则为 "h2"–"h6"(级别由 heading_level() 判定)
       _skip    正在跳过的标签栈(遇到 </x> 弹出),用于忽略 script/svg 等
       _buf     当前正在累积的文本;进入 <p>/<h*>/<figcaption>/<td> 时置空
                开始收集,遇到结束标签时 _flush() 收尾——这样标签内再嵌
@@ -534,8 +570,14 @@ class PaperHTMLParser(HTMLParser):
                 return
             if self._buf is not None:  # 上一段没闭合就开了新段:先结算
                 self._flush()
+            if tag.startswith("h"):
+                level = heading_level(tag, a)
+                if level is None:
+                    return             # 论文标题本身,正文里跳过
+                self._kind = f"h{level}"
+            else:
+                self._kind = "p"
             self._buf = ""
-            self._kind = "h" if tag.startswith("h") else "p"
             if tag == "figcaption":
                 self._kind = "cap"
 
@@ -613,9 +655,9 @@ class PaperHTMLParser(HTMLParser):
             # 渲染期,因为单列表格会走代码块输出、那时不需要转义。
             if self._table is not None:
                 self._table["row"].append(text)
-        elif kind == "h":
+        elif kind.startswith("h"):
             if text:
-                self.blocks.append(("h", text))
+                self.blocks.append((kind, text))
         elif kind == "cap":
             if len(text) >= 20:  # 太短的图注多为 "(a)" 之类的编号
                 self.blocks.append(("p", "【图注】" + text))
@@ -911,7 +953,8 @@ def build_bilingual(arxiv_id: str, reg: dict) -> Path | None:
     # 2) 只翻译缓存里没有的段落。失败只记在内存里、不写缓存,否则下次重跑
     #    会因为"缓存命中"而永远跳过它——一次网络抖动就留下永久疤痕。
     failures: dict[str, str] = {}
-    todo = [t for kind, t in blocks if kind in ("h", "p") and t not in cache]
+    todo = [t for kind, t in blocks
+            if (kind.startswith("h") or kind == "p") and t not in cache]
     for i, t in enumerate(todo, 1):
         try:
             cache[t] = translate_one(t)
@@ -945,8 +988,8 @@ def build_bilingual(arxiv_id: str, reg: dict) -> Path | None:
               "> 用法:先裸读英文段,再对照下方引用块中的译文校准。", "",
               "---", ""]
     for kind, text in blocks:
-        if kind == "h" and text.strip().lower() == title.strip().lower():
-            continue  # 正文首个标题与 H1 重复,跳过
+        if kind.startswith("h") and text.strip().lower() == title.strip().lower():
+            continue  # 正文首个标题与论文标题重复,跳过
         if kind == "table":
             # 表格按原文保留、不翻译:里面多是数字与模型名,逐格机翻既容易
             # 破坏表结构,对阅读也没什么帮助。保留数据本身才是重点。
@@ -957,8 +1000,9 @@ def build_bilingual(arxiv_id: str, reg: dict) -> Path | None:
             lines += ["【原文块】", "", text, ""]
             continue
         zh = SECTION_ZH.get(text.strip()) or zh_of(text)
-        if kind == "h":
-            lines += [f"## {text}", f"*{zh}*" if zh else "", ""]
+        if kind.startswith("h"):
+            # kind 形如 "h3",级别来自 heading_level(),不再是清一色 ##
+            lines += [f"{'#' * int(kind[1:])} {text}", f"*{zh}*" if zh else "", ""]
         elif kind == "formula":
             lines += [f"$$\n{text}\n$$", ""]
         elif kind == "image":

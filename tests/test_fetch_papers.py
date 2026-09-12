@@ -146,6 +146,73 @@ class TestTableParsing(unittest.TestCase):
         self.assertEqual(formulas, ["a=1", "b=2"])
 
 
+class TestHeadingLevels(unittest.TestCase):
+    """LaTeXML 用同一套 h1–h6 承载所有层级，靠 class 区分，不能只看标签号。"""
+
+    def test_class_wins_over_tag_number(self):
+        # Abstract 是 h6，但语义上就是一级章节，不能变成 ######
+        self.assertEqual(
+            fp.heading_level("h6", {"class": "ltx_title ltx_title_abstract"}), 2)
+
+    def test_subsection_and_deeper(self):
+        self.assertEqual(
+            fp.heading_level("h3", {"class": "ltx_title ltx_title_subsection"}), 3)
+        self.assertEqual(
+            fp.heading_level("h4", {"class": "ltx_title ltx_title_subsubsection"}), 4)
+        self.assertEqual(
+            fp.heading_level("h5", {"class": "ltx_title ltx_title_paragraph"}), 5)
+
+    def test_document_title_is_skipped(self):
+        self.assertIsNone(
+            fp.heading_level("h1", {"class": "ltx_title ltx_title_document"}))
+
+    def test_falls_back_to_tag_number(self):
+        self.assertEqual(fp.heading_level("h3", {}), 3)
+        self.assertEqual(fp.heading_level("h1", {}), 2)   # # 留给论文标题
+
+    def test_parse_blocks_encodes_level_in_kind(self):
+        html = wrap('<h2 class="ltx_title ltx_title_section">1 Introduction</h2>'
+                    '<h3 class="ltx_title ltx_title_subsection">1.1 Setup</h3>'
+                    '<h4 class="ltx_title ltx_title_subsubsection">1.1.1 Details</h4>'
+                    '<h1 class="ltx_title ltx_title_document">The Paper Title</h1>')
+        kinds = [k for k, _ in fp.parse_blocks(html)]
+        self.assertEqual(kinds, ["h2", "h3", "h4"])   # 文档标题被丢掉
+
+    def test_bilingual_renders_nested_headings(self):
+        html = wrap('<h2 class="ltx_title ltx_title_section">1 Introduction</h2>'
+                    f"<p>{PARA}</p>"
+                    '<h3 class="ltx_title ltx_title_subsection">1.1 Setup</h3>'
+                    f"<p>{PARA}</p>")
+        tmp = tempfile.TemporaryDirectory()
+        saved = {n: getattr(fp, n) for n in ("BASE", "BILINGUAL_DIR", "CACHE_DIR",
+                                             "REGISTRY")}
+        try:
+            root = Path(tmp.name)
+            fp.BASE = root
+            fp.BILINGUAL_DIR = root / "双语"
+            fp.CACHE_DIR = fp.BILINGUAL_DIR / ".cache"
+            fp.REGISTRY = root / "papers.json"
+            fp.CACHE_DIR.mkdir(parents=True)
+            fp.REGISTRY.write_text('{"papers": []}', encoding="utf-8")
+            with mock.patch.object(fp, "fetch_paper_html",
+                                   return_value=(html, "test", "https://x/")), \
+                 mock.patch.object(fp, "translate_one",
+                                   side_effect=lambda t: "译"), \
+                 mock.patch("time.sleep"):
+                out = fp.build_bilingual(
+                    "1234.56789",
+                    {"papers": [{"id": "1234.56789", "category": "测试",
+                                 "title": "T"}]})
+            md = out.read_text(encoding="utf-8")
+        finally:
+            for name, value in saved.items():
+                setattr(fp, name, value)
+            tmp.cleanup()
+        self.assertIn("\n## 1 Introduction\n", md)
+        self.assertIn("\n### 1.1 Setup\n", md)
+        self.assertNotIn("\n## 1.1 Setup\n", md)
+
+
 class TestImageExtraction(unittest.TestCase):
     """arXiv/ar5iv 用 LaTeXML 渲染,大多数插图是 <object data> 而不是 <img src>。"""
 
