@@ -43,13 +43,15 @@ import re
 import sys
 import time
 import urllib.parse
-import urllib.request
 import xml.etree.ElementTree as ET
 from html.parser import HTMLParser
 from pathlib import Path
 from .config import Settings
 from . import domain
-from .storage import write_text_atomic
+from .infra.http import http_get as _http_get
+from .infra.http import http_post_json as _http_post_json
+from .infra.logging import log
+from .infra.storage import write_text_atomic
 
 # ---------------------------------------------------------------------------
 # 全局路径与常量(全部相对脚本所在目录,挪动整个文件夹也不受影响)
@@ -64,54 +66,24 @@ PROXY = None  # 形如 http://127.0.0.1:7897,由 --proxy 或环境变量 HTTPS_P
 
 
 # ---------------------------------------------------------------------------
-# 基础工具:日志、HTTP(带代理)
+# 基础工具:HTTP(带代理)
+#
+# 实现已移入 paperkit.infra.http,这里保留一层薄适配:把当前生效的 PROXY
+# 注入进去。之所以不直接 `from ... import http_get` 后就用,是为了让本模块
+# 内部对 http_get 的调用仍然走模块全局查找——现有测试用
+# mock.patch.object(fp, "http_get") 打桩,这样才继续生效。
+# 等 P3 把编排逻辑移进 services 层、PROXY 全局消失后,这层适配即可删除。
 # ---------------------------------------------------------------------------
-def log(msg: str) -> None:
-    """flush=True 让输出立刻上屏——批量任务里能实时看到进度。"""
-    try:
-        print(msg, flush=True)
-    except UnicodeEncodeError:
-        # 直接调用业务函数时可能还没经过 main() 的 UTF-8 配置。
-        # 按控制台实际编码替换无法表示的符号，避免任务因日志中断。
-        stream = sys.stdout
-        encoding = getattr(stream, "encoding", None) or "utf-8"
-        text = msg.encode(encoding, errors="replace").decode(encoding)
-        stream.write(text + "\n")
-        stream.flush()
-
-
 def http_get(url: str, timeout: int = 60) -> bytes:
-    """发 GET 请求返回响应体;设置了 PROXY 时所有流量都走代理。
-
-    Python 标准库默认不理会代码里设的代理环境变量语义,这里显式构建
-    ProxyHandler,保证 --proxy 参数对每个请求都生效。
-    """
-    req = urllib.request.Request(url, headers=UA)
-    if PROXY:
-        handler = urllib.request.ProxyHandler({"http": PROXY, "https": PROXY})
-        opener = urllib.request.build_opener(handler)
-        with opener.open(req, timeout=timeout) as resp:
-            return resp.read()
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read()
+    """发 GET 请求返回响应体;设置了 PROXY 时所有流量都走代理。"""
+    return _http_get(url, timeout=timeout, proxy=PROXY)
 
 
 def http_post_json(url: str, payload: dict, headers: dict | None = None,
                    timeout: int = 60) -> bytes:
-    """发 JSON POST 返回响应体。代理设置与 http_get 保持一致。
-
-    供 OpenAI 兼容的翻译后端使用;调用方自己解析返回的 JSON。
-    """
-    body = json.dumps(payload).encode("utf-8")
-    hdrs = {"Content-Type": "application/json", **UA, **(headers or {})}
-    req = urllib.request.Request(url, data=body, headers=hdrs, method="POST")
-    if PROXY:
-        handler = urllib.request.ProxyHandler({"http": PROXY, "https": PROXY})
-        opener = urllib.request.build_opener(handler)
-        with opener.open(req, timeout=timeout) as resp:
-            return resp.read()
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read()
+    """发 JSON POST 返回响应体。代理设置与 http_get 保持一致。"""
+    return _http_post_json(url, payload, headers=headers, timeout=timeout,
+                           proxy=PROXY)
 
 
 # ---------------------------------------------------------------------------
