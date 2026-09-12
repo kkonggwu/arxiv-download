@@ -11,6 +11,7 @@
   1. HTML 表格解析——早期版本会把 <table> 里的文字整段丢掉;
   2. 翻译缓存的失败语义——早期版本会把失败提示写进缓存,导致该段永不重试。
 """
+import io
 import json
 import sys
 import tempfile
@@ -21,6 +22,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import fetch_papers as fp  # noqa: E402
+from paperkit.config import Settings  # noqa: E402
 
 PARA = "This is a sufficiently long paragraph of English text for parsing."  # >40 字符
 
@@ -28,6 +30,39 @@ PARA = "This is a sufficiently long paragraph of English text for parsing."  # >
 def wrap(body: str) -> str:
     """包一层论文正文容器,模拟 arXiv/ar5iv 的页面结构。"""
     return f'<div class="ltx_page_main">{body}</div><div class="ltx_page_footer">x</div>'
+
+
+class TestLogging(unittest.TestCase):
+    def test_log_replaces_unencodable_console_characters(self):
+        stream = io.TextIOWrapper(io.BytesIO(), encoding="gbk")
+        with mock.patch.object(fp.sys, "stdout", stream):
+            fp.log("✓ 已生成")
+            stream.flush()
+        self.assertEqual(stream.buffer.getvalue().decode("gbk").splitlines(), ["? 已生成"])
+
+
+class TestAtomicWrites(unittest.TestCase):
+    def test_write_text_atomic_replaces_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "state.json"
+            target.write_text("old", encoding="utf-8")
+            fp.write_text_atomic(target, "new")
+            self.assertEqual(target.read_text(encoding="utf-8"), "new")
+            self.assertFalse((Path(tmp) / "state.json.tmp").exists())
+
+
+class TestSettings(unittest.TestCase):
+    def test_cli_values_override_environment(self):
+        with mock.patch.dict("os.environ", {
+            "HTTPS_PROXY": "http://env-proxy",
+            "TRANSLATE_BACKEND": "openai",
+            "TRANSLATE_MODEL": "env-model",
+        }, clear=False):
+            settings = Settings.from_values(
+                proxy="http://cli-proxy", translator="google", model="cli-model")
+        self.assertEqual(settings.proxy, "http://cli-proxy")
+        self.assertEqual(settings.translate_backend, "google")
+        self.assertEqual(settings.openai_model, "cli-model")
 
 
 class TestTableParsing(unittest.TestCase):
