@@ -246,6 +246,69 @@ class TestImageLocalization(unittest.TestCase):
         self.assertEqual(rel.as_posix(), "1706.03762/assets/x.svg")
 
 
+ATOM_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <title>Attention Is All You Need</title>
+    <author><name>Ashish Vaswani</name></author>
+    <author><name>Noam Shazeer</name></author>
+    <published>2017-06-12T17:57:34Z</published>
+  </entry>
+</feed>"""
+
+
+class TestMetadata(unittest.TestCase):
+    """元数据取不到时不能把占位文件名固化进登记表。"""
+
+    def test_success_parses_fields(self):
+        with mock.patch.object(fp, "http_get", return_value=ATOM_XML.encode()):
+            meta = fp.fetch_metadata("1706.03762")
+        self.assertEqual(meta["title"], "Attention Is All You Need")
+        self.assertEqual(meta["year"], "2017")
+        self.assertEqual(meta["authors"], ["Ashish Vaswani", "Noam Shazeer"])
+
+    def test_network_failure_returns_none(self):
+        with mock.patch.object(fp, "http_get", side_effect=OSError("unreachable")):
+            self.assertIsNone(fp.fetch_metadata("1706.03762"))
+
+    def test_empty_title_returns_none(self):
+        xml = ATOM_XML.replace("Attention Is All You Need", "")
+        with mock.patch.object(fp, "http_get", return_value=xml.encode()):
+            self.assertIsNone(fp.fetch_metadata("1706.03762"))
+
+    def test_resolve_entry_omits_file_when_metadata_fails(self):
+        with mock.patch.object(fp, "http_get", side_effect=OSError("boom")):
+            entry = fp.resolve_entry("1706.03762", "经典")
+        self.assertEqual(entry, {"id": "1706.03762", "category": "经典"})
+        self.assertNotIn("file", entry)
+
+    def test_resolve_entry_sets_file_when_metadata_ok(self):
+        with mock.patch.object(fp, "http_get", return_value=ATOM_XML.encode()):
+            entry = fp.resolve_entry("1706.03762", "经典")
+        self.assertIn("file", entry)
+        self.assertTrue(entry["file"].endswith("[1706.03762].pdf"))
+
+    def test_ensure_metadata_leaves_entry_untouched_on_failure(self):
+        entry = {"id": "1706.03762", "category": "经典"}
+        with mock.patch.object(fp, "http_get", side_effect=OSError("boom")):
+            self.assertFalse(fp.ensure_metadata(entry))
+        self.assertEqual(entry, {"id": "1706.03762", "category": "经典"})
+
+    def test_ensure_metadata_is_retried_after_failure(self):
+        """核心回归:第一次失败后,第二次必须还会真的去拉元数据。"""
+        entry = {"id": "1706.03762", "category": "经典"}
+        with mock.patch.object(fp, "http_get", side_effect=OSError("boom")):
+            self.assertFalse(fp.ensure_metadata(entry))
+        self.assertNotIn("file", entry)      # 没被占位名污染
+
+        with mock.patch.object(fp, "http_get",
+                               return_value=ATOM_XML.encode()) as g:
+            self.assertTrue(fp.ensure_metadata(entry))
+        self.assertTrue(g.called)            # 确实重新请求了
+        self.assertEqual(entry["title"], "Attention Is All You Need")
+        self.assertTrue(entry["file"].endswith("[1706.03762].pdf"))
+
+
 class TestBilingualCache(unittest.TestCase):
     """验证失败不落缓存、历史失败缓存会被清理并重试。"""
 

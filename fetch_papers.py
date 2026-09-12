@@ -139,11 +139,14 @@ def parse_arxiv_id(text: str) -> str | None:
     return None
 
 
-def fetch_metadata(arxiv_id: str) -> dict:
-    """通过 arXiv Atom API 拿标题/作者/年份。失败时返回最小占位信息。
+def fetch_metadata(arxiv_id: str) -> dict | None:
+    """通过 arXiv Atom API 拿标题/作者/年份;取不到时返回 None。
 
-    API 一次可查多篇,这里简单起见逐篇查。网络失败不应阻塞整批下载,
-    所以捕获所有异常、降级为占位(标题=id),后续 --all 还能重试补全。
+    API 一次可查多篇,这里简单起见逐篇查。网络失败不抛异常,而是返回 None,
+    由调用方决定怎么办——**关键是不能降级成占位文件名**:
+    文件名一旦按占位值写进登记表,`--all` 的补全条件("file" 不存在)就不再
+    成立,这篇论文会被永久钉死在错误的名字上(实测过一次网络抖动就会留下
+    `- Unknown - <id> [<id>].pdf` 这种名字,而且再也改不回来)。
     """
     url = f"https://export.arxiv.org/api/query?id_list={arxiv_id}"
     try:
@@ -153,15 +156,18 @@ def fetch_metadata(arxiv_id: str) -> dict:
             raise ValueError("entry not found")
         # 标题里的换行/多空格压成一个空格,否则文件名会断裂
         title = re.sub(r"\s+", " ", entry.findtext(f"{ATOM}title", "").strip())
+        if not title:
+            raise ValueError("title 为空")
         authors = [
             a.findtext(f"{ATOM}name", "").strip()
             for a in entry.findall(f"{ATOM}author")
         ]
         published = entry.findtext(f"{ATOM}published", "")[:4]  # '2025-01-...' -> '2025'
-        return {"title": title, "authors": authors, "year": published or "????", "id": arxiv_id}
+        return {"title": title, "authors": authors,
+                "year": published or "unknown", "id": arxiv_id}
     except Exception as e:
-        log(f"  ! 元数据获取失败({e}),使用占位文件名")
-        return {"title": arxiv_id, "authors": [], "year": "????", "id": arxiv_id}
+        log(f"  ! 元数据获取失败({e})")
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -220,7 +226,12 @@ def download_pdf(arxiv_id: str, dest: Path, force: bool = False) -> str:
 
 
 def resolve_entry(text: str, category: str | None) -> dict | None:
-    """把命令行输入(id 或 URL)解析成一条完整的登记条目。"""
+    """把命令行输入(id 或 URL)解析成一条完整的登记条目。
+
+    元数据取不到时返回**只含 id + category** 的条目(没有 file 字段):
+    条目照样进登记表,但这次不下载,下次 `--all` 会把元数据和 PDF 一起补上。
+    绝不能退而求其次用占位名先落盘——那样登记表就再也补不回来了。
+    """
     arxiv_id = parse_arxiv_id(text)
     if not arxiv_id:
         log(f"! 无法识别: {text} (需要 arXiv id 或 arxiv.org 链接)")
@@ -228,8 +239,26 @@ def resolve_entry(text: str, category: str | None) -> dict | None:
     log(f"* 拉取元数据 {arxiv_id} ...")
     meta = fetch_metadata(arxiv_id)
     cat = category or "未分类"
-    fname = make_filename(meta)
-    return {**meta, "category": cat, "file": fname}
+    if meta is None:
+        log(f"  ! 元数据未取到:先只登记 id 与分类,下次 --all 自动补全")
+        return {"id": arxiv_id, "category": cat}
+    return {**meta, "category": cat, "file": make_filename(meta)}
+
+
+def ensure_metadata(entry: dict) -> bool:
+    """给只登记了 id 的条目补全元数据与文件名;成功返回 True。
+
+    失败时**原样返回 False、不碰 entry**:尤其是绝不写 `file` 字段。
+    因为 --all 判断"要不要补全"的依据就是 `"file" not in entry`,
+    一旦写进占位文件名,这个条目就再也补不回来了。
+    """
+    meta = fetch_metadata(entry["id"])
+    if meta is None:
+        return False
+    entry.update(meta)
+    entry["category"] = entry.get("category", "未分类")
+    entry["file"] = make_filename(entry)
+    return True
 
 
 def download_entry(entry: dict, force: bool = False) -> str:
@@ -844,7 +873,10 @@ def build_bilingual(arxiv_id: str, reg: dict) -> Path | None:
         entry = known[arxiv_id]
     else:  # 清单外临时指定也支持,顺手登记进去
         log(f"* {arxiv_id} 不在清单中,拉取元数据...")
-        entry = fetch_metadata(arxiv_id)
+        # 元数据取不到也照样能生成,标题退化成 id;不写 file 字段,
+        # 留给 --all 补全(登记表里没有 file 就说明元数据还没拿到)。
+        entry = fetch_metadata(arxiv_id) or {"id": arxiv_id, "title": arxiv_id}
+        entry.setdefault("id", arxiv_id)
         entry["category"] = "未分类"
         reg["papers"].append(entry)
         known[arxiv_id] = entry
@@ -957,7 +989,16 @@ def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-    ap = argparse.ArgumentParser(add_help=False, description="arXiv 论文下载脚手架")
+    # add_help 保持默认的 True:之前设成 False 又没别的参数占用 -h,
+    # 结果 --help/-h 一律报 "unrecognized arguments",帮助只能靠不带参数触发。
+    ap = argparse.ArgumentParser(
+        description="arXiv 论文下载脚手架:下载 PDF、生成中英对照阅读材料",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="示例:\n"
+               "  python fetch_papers.py --all                      下载清单中所有未落盘论文\n"
+               "  python fetch_papers.py 2501.12948 -c 推理前沿      添加并下载一篇\n"
+               "  python fetch_papers.py --bilingual 2501.12948     生成中英对照材料\n"
+               "  python fetch_papers.py --list                     查看清单与状态\n")
     ap.add_argument("papers", nargs="*", help="arXiv id 或 arxiv.org 链接")
     ap.add_argument("-c", "--category", default=None, help="新增论文的分类(目录名)")
     ap.add_argument("-a", "--all", action="store_true", help="下载清单中所有未落盘论文")
@@ -996,10 +1037,16 @@ def main() -> int:
     # ---- 模式一:--list,本地操作,不联网 ----
     if args.list:
         for p in reg["papers"]:
-            path = OUTDIR / sanitize(p["category"]) / p["file"]
+            cat = p.get("category", "未分类")
+            if "file" not in p:      # 元数据还没补全的条目
+                log(f" [  ] {cat:<10} {p['id']} (待补全元数据)")
+                continue
+            path = OUTDIR / sanitize(cat) / p["file"]
             mark = "✓" if path.exists() else " "
-            bi = "◈" if p.get("bilingual") else " "
-            log(f" [{mark}{bi}] {p['category']:<10} {p['file']}")
+            # ◈ 也查一次磁盘:只看 registry 字段的话,删掉 md 之后仍会显示已生成
+            bi = "◈" if (p.get("bilingual")
+                         and (BASE / Path(p["bilingual"])).exists()) else " "
+            log(f" [{mark}{bi}] {cat:<10} {p['file']}")
         log(f"\n共 {len(reg['papers'])} 篇(◈ = 已生成中英对照)")
         return 0
 
@@ -1026,23 +1073,24 @@ def main() -> int:
             return 0
         ok = 0
         dirty = False
+        total = len(reg["papers"])
         for i, p in enumerate(reg["papers"], 1):
             if "file" not in p:  # 清单里只登记了 id,先补全元数据
-                log(f"[{i}/{len(reg['papers'])}] {p['id']} (拉取元数据...)")
-                meta = fetch_metadata(p["id"])
-                p.update(meta)
-                p["category"] = p.get("category", "未分类")
-                p["file"] = make_filename(p)
+                log(f"[{i}/{total}] {p['id']} (拉取元数据...)")
+                if not ensure_metadata(p):
+                    log(f"  ! 元数据未取到,本条跳过(下次 --all 会重试)")
+                    time.sleep(3)
+                    continue
                 dirty = True
                 time.sleep(3)
             else:
-                log(f"[{i}/{len(reg['papers'])}] {p['id']}")
+                log(f"[{i}/{total}] {p['id']}")
             if download_entry(p, force=args.force) != "failed":
                 ok += 1
             time.sleep(3)  # arXiv 限流:请求间隔 ≥3s
         if dirty:
             save_registry(reg)
-        log(f"\n完成:{ok}/{len(reg['papers'])} 篇可用,存于 {OUTDIR}")
+        log(f"\n完成:{ok}/{total} 篇可用,存于 {OUTDIR}")
         return 0
 
     # ---- 模式四:位置参数,添加并下载指定论文 ----
@@ -1059,7 +1107,10 @@ def main() -> int:
             reg["papers"].append(entry)
             known[entry["id"]] = entry
             added += 1
-        log(f"[{i + 1}/{len(args.papers)}] {entry['id']} - {entry['title'][:60]}")
+        log(f"[{i + 1}/{len(args.papers)}] {entry['id']} - "
+            f"{entry.get('title', '(元数据待补全)')[:60]}")
+        if "file" not in entry:
+            continue  # 元数据没拿到,下次 --all 再补全并下载
         if download_entry(entry, force=args.force) != "failed":
             ok += 1
         if i < len(args.papers) - 1:
