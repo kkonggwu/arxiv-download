@@ -7,6 +7,7 @@
 ├── fetch_papers.py            # 下载 + 中英对照脚手架(仅依赖 Python 标准库)
 ├── papers.json                # 论文登记表(id + 分类;下载后自动补全元数据)
 ├── tests/                     # 回归测试(unittest,不联网)
+├── docs/ARCHITECTURE.md       # 模块化重构设计方案(分层、契约、迁移路线)
 ├── papers/                    # 下载的 PDF,按分类分目录(已 gitignore)
 │   ├── 经典/
 │   ├── 推理前沿/
