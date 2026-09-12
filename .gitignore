@@ -12,6 +12,14 @@ papers/
 __pycache__/
 *.py[cod]
 
+# 打包与测试工具产物
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
 # uv 的本地缓存目录（见 .learnings/ERRORS.md 中 ERR-20260910-002）
 .uv-cache/
 

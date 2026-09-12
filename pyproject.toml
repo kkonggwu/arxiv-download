@@ -4,9 +4,40 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "paperkit"
-version = "0.1.0"
-requires-python = ">=3.10"
+version = "0.2.0"
+description = "arXiv 论文下载与中英对照阅读材料生成"
+readme = "README.md"
+# 代码里用了 `str | None` 与 dataclass(slots=True),3.10 起才支持前者,
+# 但 slots 与部分 typing 用法按 3.11 校验更稳。
+requires-python = ">=3.11"
+# 硬约束:运行时零第三方依赖。这个工具要能在任何装了 Python 的机器上
+# 直接跑起来,不因为一个 pip 装不上而失效。
 dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "ruff>=0.4"]
+
+[project.scripts]
+papers = "paperkit.cli.main:main"
+
+[tool.setuptools.packages.find]
+include = ["paperkit*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# 测试全程离线,不需要网络;按文件名发现 tests/ 下各层子包
+python_files = ["test_*.py"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]
+ignore = [
+    "E501",    # 行长交给 formatter,注释里有中文说明
+    "SIM108",  # 三元表达式在中文注释语境下不一定更好读
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]   # 测试需要先做 sys.path 引导再 import
