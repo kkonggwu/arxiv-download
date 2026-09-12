@@ -35,7 +35,7 @@ The default uv cache directory was not writable by the sandbox.
 
 **Logged**: 2026-09-10
 **Priority**: medium
-**Status**: pending
+**Status**: resolved
 **Area**: tests
 
 ### Summary
@@ -54,5 +54,13 @@ Install or expose a working Python interpreter before running automated verifica
 ### Metadata
 - Reproducible: unknown
 - Related Files: fetch_papers.py
+
+### Resolution
+- **Resolved**: 2026-09-12
+- **Notes**: Use the managed interpreter instead of the WindowsApps stub:
+  `C:\Users\User\.workbuddy-ai\binaries\python\versions\3.13.12\python.exe`
+  (Python 3.13.14). Verified with
+  `"<managed python>" -m unittest discover -s tests` → 17 passed.
+  Keep using `UV_CACHE_DIR=.uv-cache` for any `uv` invocation.
 
 ---
