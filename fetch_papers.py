@@ -362,6 +362,26 @@ def render_equation_rows(rows: list[list[str]]) -> list[str]:
     return out
 
 
+def _graphic_src(tag: str, attrs: dict) -> str:
+    """从 <img>/<object> 的属性里取图片地址,取不到返回空串。
+
+    LaTeXML 渲染的论文里,大多数插图不是 <img> 而是
+    <object type="image/svg+xml" data="...">,只认 <img src> 会漏掉绝大多数图。
+
+    <object> 也可能用来嵌入非图片内容,所以 type 存在时必须是以 image/ 开头;
+    <img> 则额外兼容几种懒加载写法与 srcset。
+    """
+    if tag == "object":
+        typ = (attrs.get("type") or "").strip().lower()
+        if typ and not typ.startswith("image/"):
+            return ""
+    src = (attrs.get("src") or attrs.get("data") or attrs.get("data-src") or
+           attrs.get("data-lazy-src") or attrs.get("data-original"))
+    if not src and attrs.get("srcset"):
+        src = attrs["srcset"].split(",")[0].strip().split(" ")[0]
+    return (src or "").strip()
+
+
 class PaperHTMLParser(HTMLParser):
     """从 arXiv/ar5iv 的 HTML 中抽取标题、正文段落与表格。
 
@@ -398,9 +418,10 @@ class PaperHTMLParser(HTMLParser):
         self._kind = "p"
         self._table: dict | None = None
         self._table_depth = 0
-        # 解析过程中见到过几个 <img>(含表格内联的)。parse_blocks 用它判断
-        # 是否需要走正则兜底,比"结果里有没有 image 块"更准。
-        self.img_count = 0
+        # 解析过程中见到过几张图(<img> 与 <object type="image/*"> 都算)。
+        # parse_blocks 用它判断是否需要走正则兜底,比"结果里有没有 image 块"
+        # 更准——表格内的图片是内联进单元格的,按结果判断会误触发兜底。
+        self.graphic_count = 0
 
     def _skip_this(self, tag: str, attrs: dict) -> bool:
         """判断某标签子树是否整体不要(脚本/样式/参考文献)。"""
@@ -413,20 +434,7 @@ class PaperHTMLParser(HTMLParser):
     def handle_starttag(self, tag, attrs):
         a = dict(attrs)
 
-        if tag == "img":
-            self.img_count += 1
-            src = (a.get("src") or a.get("data-src") or
-                   a.get("data-lazy-src") or a.get("data-original"))
-            if not src and a.get("srcset"):
-                src = a["srcset"].split(",")[0].strip().split(" ")[0]
-            if src:
-                alt = a.get("alt", "").strip()
-                if self._buf is not None:   # 单元格/段落内的图片:内联进去
-                    self._buf += f" ![{alt}]({src}) "
-                else:
-                    self.blocks.append(("image", f"{src}\t{alt}"))
-            return
-
+        # 跳过判定放在最前面:script/svg/参考文献里的 <img> 也不该被收进来。
         if self._skip:  # 已在跳过中:嵌套的可跳过标签入栈,其余无视
             if self._skip_this(tag, a) or tag == "math":
                 self._skip.append(tag)
@@ -434,6 +442,22 @@ class PaperHTMLParser(HTMLParser):
         if self._skip_this(tag, a):
             self._skip.append(tag)
             return
+
+        if tag in ("img", "object"):
+            src = _graphic_src(tag, a)
+            if not src:
+                return
+            self.graphic_count += 1
+            alt = a.get("alt", "").strip()
+            if self._buf is not None:   # 单元格/段落内的图片:内联进去
+                self._buf += f" ![{alt}]({src}) "
+            else:
+                self.blocks.append(("image", f"{src}\t{alt}"))
+            if tag == "object":
+                # <object> 可能带回退内容,整棵子树跳过,免得同一张图收两遍
+                self._skip.append("object")
+            return
+
         if tag == "math":  # 公式以内联 LaTeX 呈现
             alt = (a.get("alttext") or "").replace("\n", " ")
             in_eq_table = self._table is not None and self._table["equation"]
@@ -571,22 +595,28 @@ class PaperHTMLParser(HTMLParser):
                 self.blocks.append(("p", text))
 
 
-def fetch_paper_html(arxiv_id: str) -> tuple[str, str]:
-    """抓取论文 HTML 版,优先 arXiv 原生,失败退回 ar5iv。返回 (html, 来源)。
+def fetch_paper_html(arxiv_id: str) -> tuple[str, str, str]:
+    """抓取论文 HTML 版,优先 arXiv 原生,失败退回 ar5iv。
+
+    返回 (html, 来源名, 图片基址)。基址必须跟着来源走,因为两个源的图片
+    相对路径格式不同,拼错就是 404:
+      arxiv: data="2501.12948v2/plot.svg"            → https://arxiv.org/html/
+      ar5iv: data="/html/2501.12948/assets/plot.svg" → https://ar5iv.labs.arxiv.org
 
     arXiv 官方 HTML 只有 2024 年初以后的论文;更早的由 ar5iv(公益项目,
     同样是 LaTeXML 渲染)兜底。两个源的 HTML 结构相同,后面解析无差别。
     """
     sources = [
-        (f"https://arxiv.org/html/{arxiv_id}", "arxiv"),
-        (f"https://ar5iv.labs.arxiv.org/html/{arxiv_id}", "ar5iv"),
+        (f"https://arxiv.org/html/{arxiv_id}", "arxiv", "https://arxiv.org/html/"),
+        (f"https://ar5iv.labs.arxiv.org/html/{arxiv_id}", "ar5iv",
+         "https://ar5iv.labs.arxiv.org"),
     ]
     last_err = None
-    for url, name in sources:
+    for url, name, base in sources:
         try:
             html = http_get(url, timeout=90).decode("utf-8", errors="replace")
             if "<p" in html or "ltx_" in html:  # 粗验:页面确实有正文
-                return html, name
+                return html, name, base
             last_err = f"{name}: 页面无正文"
         except Exception as e:
             last_err = f"{name}: {e}"
@@ -594,7 +624,7 @@ def fetch_paper_html(arxiv_id: str) -> tuple[str, str]:
 
 
 def parse_blocks(html: str) -> list[tuple[str, str]]:
-    """HTML → 区块序列(kind 为 h/p/table/formula/image)。
+    """HTML → 区块序列(kind 为 h/p/table/verbatim/formula/image)。
 
     先做字符串级裁剪:只保留 <div class="ltx_page_main">(论文正文容器)
     到页脚之间的部分,把 ar5iv/arxiv 页面的导航按钮、页脚等噪声整个
@@ -612,15 +642,17 @@ def parse_blocks(html: str) -> list[tuple[str, str]]:
     p.feed(html)
     # Some arXiv HTML variants use malformed/lazy-loaded image markup that
     # HTMLParser may skip. Recover image sources from the same main-content HTML.
-    # 用解析期见过的 <img> 计数判断,而不是看结果里有没有 image 块——表格内的
+    # 用解析期见到的图片计数判断,而不是看结果里有没有 image 块——表格内的
     # 图片现在是内联进单元格的,按结果判断会误触发兜底、把图重复加一遍。
-    if p.img_count == 0:
-        for match in re.finditer(r"<img\b([^>]*)>", html, re.I | re.S):
-            attrs = dict(re.findall(r'''([\w:-]+)\s*=\s*["']([^"']*)["']''', match.group(1)))
-            src = (attrs.get("src") or attrs.get("data-src") or
-                   attrs.get("data-lazy-src") or attrs.get("data-original"))
-            if not src and attrs.get("srcset"):
-                src = attrs["srcset"].split(",")[0].strip().split(" ")[0]
+    if p.graphic_count == 0:
+        # 兜底扫描是字符串级的,不认 skip 栈,所以只扫到参考文献为止,
+        # 免得把里面的图也捞出来(参考文献恒在正文之后,截断即可)。
+        bib = html.find("ltx_bibliograph")
+        scan = html[:bib] if bib != -1 else html
+        for match in re.finditer(r"<(img|object)\b([^>]*)>", scan, re.I | re.S):
+            attrs = dict(re.findall(r'''([\w:-]+)\s*=\s*["']([^"']*)["']''',
+                                    match.group(2)))
+            src = _graphic_src(match.group(1).lower(), attrs)
             if src:
                 p.blocks.append(("image", f"{src}\t{attrs.get('alt', '').strip()}"))
     return p.blocks
@@ -728,15 +760,84 @@ def translate_one(text: str) -> str:
     raise RuntimeError(f"翻译失败: {last_err}")
 
 
+def _asset_relpath(abs_url: str) -> Path:
+    """从图片绝对 URL 推出它在 assets/ 下的相对路径。
+
+    arxiv: /html/2501.12948v2/plot.svg     → 2501.12948v2/plot.svg
+    ar5iv: /html/1706.03762/assets/x.svg   → 1706.03762/assets/x.svg
+    保留原有的目录层级,既避免同名文件互相覆盖,也便于对照原始来源。
+    """
+    path = urllib.parse.urlparse(abs_url).path.lstrip("/")
+    if path.startswith("html/"):      # ar5iv 的路径带这个前缀,去掉更清爽
+        path = path[len("html/"):]
+    parts = [sanitize(p) for p in path.split("/") if p not in ("", ".", "..")]
+    parts = [p for p in parts if p]
+    return Path(*parts) if parts else Path("image")
+
+
+def localize_images(lines: list[str], arxiv_id: str, base: str) -> list[str]:
+    """把 Markdown 里的图片链接下载到本地并改成相对路径引用。
+
+    图片统一落到 papers/双语/assets/<id>/<原相对路径>,正文用相对于 md 的
+    `../assets/...` 引用——和 PDF、翻译缓存一样全本地,断网也能看图。
+
+    已存在的文件直接复用,不重复请求;单张失败时退回绝对 URL(链接至少是
+    通的),不因为一张图失败就中断整篇。表格单元格里内联的图片走的是同一套
+    替换,所以这里对整个 md 行做正则,而不是只处理 image 区块。
+    """
+    pattern = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)\)")
+    dest_root = BILINGUAL_DIR / "assets" / arxiv_id
+    mapping: dict[str, str] = {}
+    stats = {"new": 0, "reused": 0, "failed": 0}
+
+    def repl(match: re.Match) -> str:
+        alt, url = match.group(1), match.group(2)
+        if url.startswith(("http://", "https://", "data:")):
+            return match.group(0)          # 已经是绝对地址,不动
+        if url in mapping:
+            return f"![{alt}]({mapping[url]})"
+
+        abs_url = urllib.parse.urljoin(base, url)
+        rel = _asset_relpath(abs_url)
+        dest = dest_root / rel
+        local = f"../assets/{arxiv_id}/{rel.as_posix()}"
+
+        if dest.exists() and dest.stat().st_size > 0:
+            stats["reused"] += 1
+            mapping[url] = local
+            return f"![{alt}]({local})"
+        try:
+            data = http_get(abs_url, timeout=60)
+            head = data[:200].lstrip().lower()
+            if not data or head.startswith((b"<!doctype html", b"<html")):
+                raise ValueError("返回的不是图片(可能被限流或 404)")
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(data)
+            stats["new"] += 1
+            mapping[url] = local
+            return f"![{alt}]({local})"
+        except Exception as e:
+            log(f"  ! 图片下载失败 {url}: {e}")
+            stats["failed"] += 1
+            mapping[url] = abs_url
+            return f"![{alt}]({abs_url})"
+
+    out = [pattern.sub(repl, line) for line in lines]
+    if stats["new"] or stats["failed"] or stats["reused"]:
+        log(f"  图片:新增 {stats['new']} 张、复用 {stats['reused']} 张、"
+            f"失败 {stats['failed']} 张 → {dest_root.relative_to(BASE)}")
+    return out
+
+
 def build_bilingual(arxiv_id: str, reg: dict) -> Path | None:
     """为一篇论文生成中英对照 Markdown,返回输出路径。
 
-    五步:登记条目 → 读缓存 → 翻译缺的段落 → 拼装 Markdown → 回写
-    缓存与登记表。缓存以"英文原文"为 key,所以改输出格式、加纠错词条
-    都不用重新翻译,重跑秒级完成。
+    步骤:登记条目 → 读缓存 → 翻译缺的段落 → 拼装 Markdown →
+    下载图片到 assets/ → 回写缓存与登记表。缓存以"英文原文"为 key,
+    所以改输出格式、加纠错词条都不用重新翻译,重跑秒级完成。
 
     只有成功的译文才写进缓存:失败的段落仅在本次渲染时标 ⚠,重跑会自动
-    重试。表格与公式不进缓存(它们不参与翻译)。
+    重试。表格、公式与原文块不进缓存(它们不参与翻译)。
     """
     known = {p["id"]: p for p in reg["papers"]}
     if arxiv_id in known:
@@ -765,9 +866,9 @@ def build_bilingual(arxiv_id: str, reg: dict) -> Path | None:
         log(f"  清理 {len(stale)} 条历史失败缓存,本次重试")
     out_file = out_dir / f"{arxiv_id} 中英对照.md"
 
-    # 1) 抓 HTML 并解析
+    # 1) 抓 HTML 并解析(base 是图片基址,两个源的路径格式不同,必须一起带上)
     log(f"* 抓取 {arxiv_id} 的 HTML 版...")
-    html, source = fetch_paper_html(arxiv_id)
+    html, source, base = fetch_paper_html(arxiv_id)
     blocks = parse_blocks(html)
     n_paras = sum(1 for k, _ in blocks if k == "p")
     n_tables = sum(1 for k, _ in blocks if k == "table")
@@ -829,11 +930,13 @@ def build_bilingual(arxiv_id: str, reg: dict) -> Path | None:
         elif kind == "formula":
             lines += [f"$$\n{text}\n$$", ""]
         elif kind == "image":
+            # 只留原始相对路径,绝对化与本地化统一交给 localize_images
             src, _, alt = text.partition("\t")
-            src = urllib.parse.urljoin(f"https://arxiv.org/html/{arxiv_id}/", src)
             lines += [f"![{alt}]({src})", ""]
         else:
             lines += [text, "", f"> {zh}" if zh else "", ""]
+    # 5) 图片落地:把正文里的远程图片链接下载到 assets/,换成相对路径引用
+    lines = localize_images(lines, arxiv_id, base)
     out_file.write_text("\n".join(lines), encoding="utf-8")
 
     # 5) 回写:缓存落盘(断点续传的依据),登记表记录产出路径(--list 显示 ◈)

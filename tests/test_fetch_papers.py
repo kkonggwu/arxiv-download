@@ -146,6 +146,106 @@ class TestTableParsing(unittest.TestCase):
         self.assertEqual(formulas, ["a=1", "b=2"])
 
 
+class TestImageExtraction(unittest.TestCase):
+    """arXiv/ar5iv 用 LaTeXML 渲染,大多数插图是 <object data> 而不是 <img src>。"""
+
+    def test_object_data_is_captured(self):
+        html = wrap('<figure><object type="image/svg+xml" '
+                    'data="2501.12948v2/plot.svg"></object>'
+                    "<figcaption>Figure 1: A plot of something.</figcaption>"
+                    "</figure>")
+        imgs = [t for k, t in fp.parse_blocks(html) if k == "image"]
+        self.assertEqual(imgs, ["2501.12948v2/plot.svg\t"])
+
+    def test_img_src_still_captured_with_alt(self):
+        html = wrap('<img src="a.png" alt="Refer to caption">')
+        imgs = [t for k, t in fp.parse_blocks(html) if k == "image"]
+        self.assertEqual(imgs, ["a.png\tRefer to caption"])
+
+    def test_object_with_non_image_type_is_ignored(self):
+        html = wrap('<object type="text/html" data="foo.html"></object>')
+        self.assertEqual([k for k, _ in fp.parse_blocks(html)], [])
+
+    def test_lazy_loading_attributes_are_supported(self):
+        html = wrap('<img data-src="lazy.png">')
+        imgs = [t for k, t in fp.parse_blocks(html) if k == "image"]
+        self.assertEqual(imgs, ["lazy.png\t"])
+
+    def test_image_inside_bibliography_is_skipped(self):
+        html = wrap('<div class="ltx_bibliograph">'
+                    '<object type="image/svg+xml" data="x.svg"></object></div>')
+        self.assertEqual([k for k, _ in fp.parse_blocks(html)], [])
+
+    def test_object_fallback_content_is_not_double_counted(self):
+        # <object> 里可能带回退用的 <img>,同一张图不能收两遍
+        html = wrap('<object type="image/svg+xml" data="real.svg">'
+                    '<img src="fallback.png"></object>')
+        imgs = [t for k, t in fp.parse_blocks(html) if k == "image"]
+        self.assertEqual(imgs, ["real.svg\t"])
+
+
+class TestImageLocalization(unittest.TestCase):
+    """图片要落到 assets/ 并改成相对路径,离线也能看图。"""
+
+    PID = "1234.56789"
+    BASE = "https://arxiv.org/html/"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self._saved = {n: getattr(fp, n) for n in ("BASE", "BILINGUAL_DIR")}
+        fp.BASE = Path(self.tmp.name)
+        fp.BILINGUAL_DIR = fp.BASE / "双语"
+
+    def tearDown(self):
+        for name, value in self._saved.items():
+            setattr(fp, name, value)
+        self.tmp.cleanup()
+
+    def _lines(self):
+        return [f"![Refer to caption]({self.PID}v2/plot.svg)", ""]
+
+    def test_relative_url_is_downloaded_and_rewritten(self):
+        with mock.patch.object(fp, "http_get", return_value=b"<svg/>") as g:
+            out = fp.localize_images(self._lines(), self.PID, self.BASE)
+        self.assertEqual(out[0], f"![Refer to caption](../assets/{self.PID}/"
+                                 f"{self.PID}v2/plot.svg)")
+        dest = fp.BILINGUAL_DIR / "assets" / self.PID / f"{self.PID}v2" / "plot.svg"
+        self.assertEqual(dest.read_bytes(), b"<svg/>")
+        g.assert_called_once_with(f"https://arxiv.org/html/{self.PID}v2/plot.svg",
+                                  timeout=60)
+
+    def test_existing_file_is_reused_without_request(self):
+        dest = fp.BILINGUAL_DIR / "assets" / self.PID / f"{self.PID}v2" / "plot.svg"
+        dest.parent.mkdir(parents=True)
+        dest.write_bytes(b"<svg/>")
+        with mock.patch.object(fp, "http_get") as g:
+            out = fp.localize_images(self._lines(), self.PID, self.BASE)
+        self.assertFalse(g.called)
+        self.assertIn(f"../assets/{self.PID}/{self.PID}v2/plot.svg", out[0])
+
+    def test_failure_falls_back_to_absolute_url(self):
+        with mock.patch.object(fp, "http_get", side_effect=OSError("boom")):
+            out = fp.localize_images(self._lines(), self.PID, self.BASE)
+        self.assertIn(f"https://arxiv.org/html/{self.PID}v2/plot.svg", out[0])
+
+    def test_html_response_is_rejected(self):
+        with mock.patch.object(fp, "http_get", return_value=b"<!DOCTYPE html><html>"):
+            out = fp.localize_images(self._lines(), self.PID, self.BASE)
+        self.assertIn("https://arxiv.org", out[0])
+
+    def test_absolute_url_is_left_alone(self):
+        lines = ["![x](https://example.com/a.png)"]
+        with mock.patch.object(fp, "http_get") as g:
+            out = fp.localize_images(lines, self.PID, self.BASE)
+        self.assertEqual(out, lines)
+        self.assertFalse(g.called)
+
+    def test_ar5iv_path_prefix_is_stripped(self):
+        rel = fp._asset_relpath("https://ar5iv.labs.arxiv.org/html/1706.03762/"
+                                "assets/x.svg")
+        self.assertEqual(rel.as_posix(), "1706.03762/assets/x.svg")
+
+
 class TestBilingualCache(unittest.TestCase):
     """验证失败不落缓存、历史失败缓存会被清理并重试。"""
 
@@ -174,7 +274,8 @@ class TestBilingualCache(unittest.TestCase):
 
     def _run(self, translate):
         with mock.patch.object(fp, "fetch_paper_html",
-                               return_value=(self.HTML, "test")), \
+                               return_value=(self.HTML, "test",
+                                             "https://example.test/html/")), \
              mock.patch.object(fp, "translate_one", side_effect=translate), \
              mock.patch("time.sleep"):
             return fp.build_bilingual(self.PID, self.reg)
