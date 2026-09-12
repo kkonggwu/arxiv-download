@@ -312,6 +312,36 @@ class TestImageLocalization(unittest.TestCase):
                                 "assets/x.svg")
         self.assertEqual(rel.as_posix(), "1706.03762/assets/x.svg")
 
+    def test_fenced_code_block_is_not_rewritten(self):
+        """代码块里是 prompt 模板原文，出现 ![](...) 字样也不能被改写。"""
+        lines = ["```",
+                 f"![not an image]({self.PID}v2/x.svg)",
+                 "```",
+                 f"![real]({self.PID}v2/plot.svg)"]
+        with mock.patch.object(fp, "http_get", return_value=b"<svg/>"):
+            out = fp.localize_images(lines, self.PID, self.BASE)
+        self.assertEqual(out[1], f"![not an image]({self.PID}v2/x.svg)")
+        self.assertIn("../assets/", out[3])
+
+    def test_tilde_fence_is_also_respected(self):
+        lines = ["~~~",
+                 f"![x]({self.PID}v2/x.svg)",
+                 "~~~"]
+        with mock.patch.object(fp, "http_get") as g:
+            out = fp.localize_images(lines, self.PID, self.BASE)
+        self.assertFalse(g.called)
+        self.assertEqual(out[1], f"![x]({self.PID}v2/x.svg)")
+
+    def test_no_download_rewrites_to_absolute_url(self):
+        with mock.patch.object(fp, "http_get") as g:
+            out = fp.localize_images(self._lines(), self.PID, self.BASE,
+                                     download=False)
+        self.assertFalse(g.called)
+        self.assertEqual(
+            out[0],
+            f"![Refer to caption](https://arxiv.org/html/{self.PID}v2/plot.svg)")
+        self.assertFalse((fp.BILINGUAL_DIR / "assets").exists())
+
 
 ATOM_XML = """<?xml version="1.0" encoding="UTF-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom">

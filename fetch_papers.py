@@ -847,7 +847,8 @@ def _asset_relpath(abs_url: str) -> Path:
     return Path(*parts) if parts else Path("image")
 
 
-def localize_images(lines: list[str], arxiv_id: str, base: str) -> list[str]:
+def localize_images(lines: list[str], arxiv_id: str, base: str,
+                    download: bool = True) -> list[str]:
     """把 Markdown 里的图片链接下载到本地并改成相对路径引用。
 
     图片统一落到 papers/双语/assets/<id>/<原相对路径>,正文用相对于 md 的
@@ -856,6 +857,12 @@ def localize_images(lines: list[str], arxiv_id: str, base: str) -> list[str]:
     已存在的文件直接复用,不重复请求;单张失败时退回绝对 URL(链接至少是
     通的),不因为一张图失败就中断整篇。表格单元格里内联的图片走的是同一套
     替换,所以这里对整个 md 行做正则,而不是只处理 image 区块。
+
+    两个必须注意的点:
+      * 围栏代码块内的行要跳过。代码块装的是 prompt 模板/清单原文,
+        里面若恰好出现 `![x](y)` 这种字样,会被误当成图片链接改写。
+      * download=False 时只把相对路径补全成绝对 URL(对应 --no-images),
+        用于离线场景:不下载,但链接仍然是通的。
     """
     pattern = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)\)")
     dest_root = BILINGUAL_DIR / "assets" / arxiv_id
@@ -870,6 +877,10 @@ def localize_images(lines: list[str], arxiv_id: str, base: str) -> list[str]:
             return f"![{alt}]({mapping[url]})"
 
         abs_url = urllib.parse.urljoin(base, url)
+        if not download:
+            mapping[url] = abs_url
+            return f"![{alt}]({abs_url})"
+
         rel = _asset_relpath(abs_url)
         dest = dest_root / rel
         local = f"../assets/{arxiv_id}/{rel.as_posix()}"
@@ -894,14 +905,30 @@ def localize_images(lines: list[str], arxiv_id: str, base: str) -> list[str]:
             mapping[url] = abs_url
             return f"![{alt}]({abs_url})"
 
-    out = [pattern.sub(repl, line) for line in lines]
+    out: list[str] = []
+    fence: str | None = None               # 当前围栏标记的字符,None=不在围栏内
+    for line in lines:
+        marker = re.match(r"\s*(`{3,}|~{3,})", line)
+        if marker:
+            char = marker.group(1)[0]
+            if fence is None:
+                fence = char
+            elif fence == char:
+                fence = None
+            out.append(line)               # 围栏行本身原样保留
+            continue
+        out.append(line if fence else pattern.sub(repl, line))
+
     if stats["new"] or stats["failed"] or stats["reused"]:
         log(f"  图片:新增 {stats['new']} 张、复用 {stats['reused']} 张、"
             f"失败 {stats['failed']} 张 → {dest_root.relative_to(BASE)}")
+    elif not download and mapping:
+        log(f"  图片:按 --no-images 跳过下载,{len(mapping)} 张改为绝对链接")
     return out
 
 
-def build_bilingual(arxiv_id: str, reg: dict) -> Path | None:
+def build_bilingual(arxiv_id: str, reg: dict,
+                    download_images: bool = True) -> Path | None:
     """为一篇论文生成中英对照 Markdown,返回输出路径。
 
     步骤:登记条目 → 读缓存 → 翻译缺的段落 → 拼装 Markdown →
@@ -1019,7 +1046,7 @@ def build_bilingual(arxiv_id: str, reg: dict) -> Path | None:
         else:
             lines += [text, "", f"> {zh}" if zh else "", ""]
     # 5) 图片落地:把正文里的远程图片链接下载到 assets/,换成相对路径引用
-    lines = localize_images(lines, arxiv_id, base)
+    lines = localize_images(lines, arxiv_id, base, download=download_images)
     out_file.write_text("\n".join(lines), encoding="utf-8")
 
     # 5) 回写:缓存落盘(断点续传的依据),登记表记录产出路径(--list 显示 ◈)
@@ -1059,6 +1086,8 @@ def main() -> int:
                     help="HTTP 代理,如 http://127.0.0.1:7897(也可用环境变量 HTTPS_PROXY)")
     ap.add_argument("-b", "--bilingual", default=None, metavar="ID|all",
                     help="为指定论文(或 all=全部)生成中英对照阅读材料")
+    ap.add_argument("--no-images", action="store_true",
+                    help="不下载插图,只把图片链接补全成 arXiv 绝对地址(离线可用)")
     ap.add_argument("-t", "--translator", default=None, choices=["google", "openai"],
                     help="翻译后端:google=免费网页接口(默认) / "
                          "openai=OpenAI 兼容接口")
@@ -1110,7 +1139,7 @@ def main() -> int:
         for i, pid in enumerate(ids, 1):
             log(f"[{i}/{len(ids)}] 生成中英对照 {pid}")
             try:
-                build_bilingual(pid, reg)
+                build_bilingual(pid, reg, download_images=not args.no_images)
             except Exception as e:  # 单篇失败不拖垮整批
                 log(f"  ✗ 失败: {e}")
             if i < len(ids):
