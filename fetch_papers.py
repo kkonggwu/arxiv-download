@@ -21,7 +21,7 @@
   python fetch_papers.py --all
       下载 papers.json 中所有尚未落盘的论文(已存在的自动跳过,可反复重跑)
 
-  python fetch_papers.py --bilingual <id|all>
+  python fetch_papers.py --bilingual <id|all> [--translator google|openai]
       生成中英对照阅读材料到 papers/双语/
 
   python fetch_papers.py --list
@@ -31,6 +31,10 @@
   * --force 可强制重新下载;--proxy 指定 HTTP 代理(直连 arXiv 常被阻断)。
   * 文件名自动取 arXiv 元数据,格式: 年份 - 第一作者 et al. - 标题 [id].pdf
   * 对 arXiv 的请求间隔 3 秒,遵守其限流要求。
+  * 翻译后端默认 google(免 Key 的免费网页接口);需要更稳定的质量时用
+    --translator openai 配合 --translate-base-url / --translate-model /
+    TRANSLATE_API_KEY,可指向任何 OpenAI 兼容服务。不同后端各用一份缓存。
+  * 译文只有成功才写缓存;失败的段落本次标 ⚠,重跑会自动重试。
 """
 import argparse
 import json
@@ -72,6 +76,24 @@ def http_get(url: str, timeout: int = 60) -> bytes:
     ProxyHandler,保证 --proxy 参数对每个请求都生效。
     """
     req = urllib.request.Request(url, headers=UA)
+    if PROXY:
+        handler = urllib.request.ProxyHandler({"http": PROXY, "https": PROXY})
+        opener = urllib.request.build_opener(handler)
+        with opener.open(req, timeout=timeout) as resp:
+            return resp.read()
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read()
+
+
+def http_post_json(url: str, payload: dict, headers: dict | None = None,
+                   timeout: int = 60) -> bytes:
+    """发 JSON POST 返回响应体。代理设置与 http_get 保持一致。
+
+    供 OpenAI 兼容的翻译后端使用;调用方自己解析返回的 JSON。
+    """
+    body = json.dumps(payload).encode("utf-8")
+    hdrs = {"Content-Type": "application/json", **UA, **(headers or {})}
+    req = urllib.request.Request(url, data=body, headers=hdrs, method="POST")
     if PROXY:
         handler = urllib.request.ProxyHandler({"http": PROXY, "https": PROXY})
         opener = urllib.request.build_opener(handler)
@@ -230,11 +252,26 @@ def download_entry(entry: dict, force: bool = False) -> str:
 # ---------------------------------------------------------------------------
 BILINGUAL_DIR = OUTDIR / "双语"
 CACHE_DIR = BILINGUAL_DIR / ".cache"
-# Google 翻译的免费网页接口(Chrome 划词词典用的通道),GET 请求,q= 后接
-# URL 编码的英文,返回 JSON。相比正式 Cloud API 免认证,但有频率限制。
-TRANSLATE_URL = ("https://clients5.google.com/translate_a/t"
-                 "?client=dict-chrome-ex&sl=en&tl=zh-CN&q=")
 MIN_PARA_CHARS = 40  # 短于此的段落视为导航/噪声,丢弃
+FAIL_MARK = "⚠"      # 译文失败标记;带此标记的缓存条目会被视为未命中并重试
+
+# ---- 翻译后端(由 --translator 或 TRANSLATE_BACKEND 选择)------------------
+# google: Google 免费网页接口(Chrome 划词词典用的通道),免认证、无需 Key,
+#         但属于非公开接口、没有 SLA,可能随时限流或失效,适合个人轻量使用。
+# openai: 任意 OpenAI 兼容的 /chat/completions 接口(OpenAI / DeepSeek / 通义 /
+#         vLLM / Ollama 等),需要 TRANSLATE_API_KEY,质量与稳定性更可控。
+TRANSLATE_BACKEND = "google"
+TRANSLATE_RETRIES = 3          # 单段翻译的重试次数(退避 2/4/6 秒)
+
+GOOGLE_TRANSLATE_URL = ("https://clients5.google.com/translate_a/t"
+                        "?client=dict-chrome-ex&sl=en&tl=zh-CN&q=")
+
+OPENAI_BASE_URL = "https://api.openai.com/v1"
+OPENAI_MODEL = "gpt-4o-mini"
+TRANSLATE_API_KEY = None       # 由 --translate-api-key 或 TRANSLATE_API_KEY 提供
+
+# openai 后端长段一次可以送更多内容,减少被切断的句子,译文衔接更自然。
+OPENAI_CHUNK_LIMIT = 4000
 
 # 常见章节名固定译法,避免逐词机翻产生"抽象的"这类笑话
 SECTION_ZH = {
@@ -264,22 +301,93 @@ def fix_acronyms(zh: str) -> str:
     return zh
 
 
+def render_table(rows: list[list[str]]) -> str:
+    """把二维单元格渲染成 Markdown 表格(GFM 管道表)。
+
+    Markdown 只支持单行表头,这里统一把首行当表头:LaTeXML 的 <thead>/<th>
+    通常就在首行,即便原表没写 <th>,把首行提升为表头也比留一行空表头更好读。
+    多行表头的情况会退化为"首行做表头、其余行当数据",数据不丢。
+
+    竖线在这里才转义(收集期保持原样),因为同一份单元格还可能走
+    render_code_block 输出成代码块,那里不需要转义。
+
+    已知取舍:colspan/rowspan 不做展开,跨列单元格只落在第一列、其余列留空,
+    因此这类表的列对齐可能与原表不一致(但文字内容不丢)。
+    """
+    if not rows:
+        return ""
+    esc = lambda c: c.replace("|", "\\|")  # noqa: E731
+    width = max(len(r) for r in rows)
+    norm = [list(r) + [""] * (width - len(r)) for r in rows]
+    out = ["| " + " | ".join(esc(c) for c in norm[0]) + " |",
+           "| " + " | ".join(["---"] * width) + " |"]
+    out += ["| " + " | ".join(esc(c) for c in r) + " |" for r in norm[1:]]
+    return "\n".join(out)
+
+
+def render_code_block(rows: list[list[str]]) -> str:
+    """单列表格渲染成围栏代码块。
+
+    论文里的单列 <table> 基本都是 prompt 模板、对话记录或代码清单,
+    套上表头分隔行反而难读,原样放进代码块更贴近原文语义。
+    围栏长度取内容中最长连续反引号 +1(至少 3),避免内容里的反引号
+    提前把代码块闭合。
+    """
+    body = "\n".join(r[0] for r in rows if r and r[0])
+    if not body:
+        return ""
+    longest = max((len(m) for m in re.findall(r"`+", body)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return f"{fence}\n{body}\n{fence}"
+
+
+# 公式编号单元格,形如 "(1)"、"(12a)";排版上属于附属信息,取公式本体时丢掉。
+_EQNO_RE = re.compile(r"^\(\d+[a-z]?\)$")
+
+
+def render_equation_rows(rows: list[list[str]]) -> list[str]:
+    """从 LaTeXML 的公式表格里取回公式本体,每个公式一项。
+
+    LaTeXML 把行间公式也包成 <table class="ltx_eqn_table">,格子通常是
+    [空白占位, 公式, 编号]。这里滤掉空占位与编号,只留公式;equationgroup
+    有多行,就一行一个公式返回。
+
+    与改动前一致:公式编号(1)(2)不保留,因此正文里的"式(1)"无法回指。
+    """
+    out = []
+    for row in rows:
+        cells = [c for c in row if c and not _EQNO_RE.match(c.strip())]
+        if cells:
+            out.append(" ".join(cells))
+    return out
+
+
 class PaperHTMLParser(HTMLParser):
-    """从 arXiv/ar5iv 的 HTML 中抽取标题与正文段落。
+    """从 arXiv/ar5iv 的 HTML 中抽取标题、正文段落与表格。
 
     这是事件驱动的流式解析:HTMLParser 边扫标签边回调,我们不建 DOM 树。
-    状态用三个实例变量维护:
-      _blocks  结果列表,("h"|"p", 文本)  h=章节标题 p=正文/图注
+    状态用四个实例变量维护:
+      _blocks  结果列表,("h"|"p"|"table"|..., 文本)
       _skip    正在跳过的标签栈(遇到 </x> 弹出),用于忽略 script/svg 等
-      _buf     当前正在累积的文本;进入 <p>/<h*> 时置空开始收集,
-               遇到结束标签时 _flush() 收尾——这样标签内再嵌 <span>、
-               <b> 等行内标签也不受影响,文本自然接在一起。
+      _buf     当前正在累积的文本;进入 <p>/<h*>/<figcaption>/<td> 时置空
+               开始收集,遇到结束标签时 _flush() 收尾——这样标签内再嵌
+               <span>、<b> 等行内标签也不受影响,文本自然接在一起。
+      _table   正在收集的表格 {"rows": [[单元格,...]], "row": [...]}
+               _table_depth 记录嵌套层数,只在最外层(depth==1)建结构,
+               嵌套表的内容直接并入外层单元格文本,避免结构错乱。
 
-    三类特殊处理:
+    四类特殊处理:
       - <math> 用其 alttext 以 $...$ 形式内联,避免公式变成乱码
       - 跳过 script/style/svg 与参考文献(ltx_bibliograph)
       - 图注(figcaption)加【图注】前缀保留为独立段落
+      - 表格分三种走法:真表格渲染成 Markdown 表(render_table);单列表格
+        其实是 prompt 模板/清单,转代码块(render_code_block);
+        <table class="ltx_eqn_table"> 实为行间公式容器,按 formula 输出
+      - 单元格内的 <p>/<h*> 不当新块处理,否则一个格子会被拆成多格
     """
+
+    # 段落级容器:进入时开新缓冲,结束时结算
+    _BLOCK_TAGS = ("h1", "h2", "h3", "h4", "h5", "h6", "p", "figcaption")
 
     def __init__(self):
         # convert_charrefs=True: &amp; 这类 HTML 实体自动解码成普通字符
@@ -288,7 +396,11 @@ class PaperHTMLParser(HTMLParser):
         self._skip: list[str] = []
         self._buf: str | None = None
         self._kind = "p"
-        self._formula_buf: str | None = None
+        self._table: dict | None = None
+        self._table_depth = 0
+        # 解析过程中见到过几个 <img>(含表格内联的)。parse_blocks 用它判断
+        # 是否需要走正则兜底,比"结果里有没有 image 块"更准。
+        self.img_count = 0
 
     def _skip_this(self, tag: str, attrs: dict) -> bool:
         """判断某标签子树是否整体不要(脚本/样式/参考文献)。"""
@@ -300,14 +412,21 @@ class PaperHTMLParser(HTMLParser):
 
     def handle_starttag(self, tag, attrs):
         a = dict(attrs)
+
         if tag == "img":
+            self.img_count += 1
             src = (a.get("src") or a.get("data-src") or
                    a.get("data-lazy-src") or a.get("data-original"))
             if not src and a.get("srcset"):
                 src = a["srcset"].split(",")[0].strip().split(" ")[0]
             if src:
-                self.blocks.append(("image", f"{src}\t{a.get('alt', '').strip()}"))
+                alt = a.get("alt", "").strip()
+                if self._buf is not None:   # 单元格/段落内的图片:内联进去
+                    self._buf += f" ![{alt}]({src}) "
+                else:
+                    self.blocks.append(("image", f"{src}\t{alt}"))
             return
+
         if self._skip:  # 已在跳过中:嵌套的可跳过标签入栈,其余无视
             if self._skip_this(tag, a) or tag == "math":
                 self._skip.append(tag)
@@ -317,19 +436,49 @@ class PaperHTMLParser(HTMLParser):
             return
         if tag == "math":  # 公式以内联 LaTeX 呈现
             alt = (a.get("alttext") or "").replace("\n", " ")
+            in_eq_table = self._table is not None and self._table["equation"]
             if alt and self._buf is not None:
-                self._buf += f" ${alt}$ "
+                # 公式表格里的 math 本身就是行间公式,输出时外层会补 $$,
+                # 这里不能再包 $...$,否则会渲染成 $$ $...$ $$。
+                self._buf += f" {alt} " if in_eq_table else f" ${alt}$ "
             elif alt:
                 self.blocks.append(("formula", alt.strip()))
             self._skip.append(tag)  # <math> 的渲染内容不要,只要 alttext
             return
-        if tag == "img":
-            src = a.get("src") or a.get("data-src")
-            if src:
-                alt = a.get("alt", "").strip()
-                self.blocks.append(("image", f"{src}\t{alt}"))
+
+        # ---- 表格:表格结构靠 td/th/tr 事件拼,文本仍走 _buf ----
+        if tag == "table":
+            if self._buf is not None:  # 表格前的残段先结算
+                self._flush()
+            self._table_depth += 1
+            if self._table_depth == 1:  # 只有最外层建结构
+                # LaTeXML 把行间公式也包在 <table class="ltx_eqn_table"> 里,
+                # 它没有表格语义,得按公式输出,否则公式会变成一行怪表。
+                self._table = {"rows": [], "row": [],
+                               "equation": "ltx_eqn_table" in a.get("class", "")}
             return
-        if tag in ("h1", "h2", "h3", "h4", "h5", "h6", "p", "figcaption"):
+        if self._table_depth == 1:
+            if tag == "tr":
+                self._end_cell()
+                self._end_row()
+                return
+            if tag in ("td", "th"):
+                self._end_cell()
+                self._buf = ""
+                self._kind = "cell"
+                return
+
+        if tag == "br" and self._buf is not None:
+            self._buf += "<br>"   # 单元格内换行:Markdown 表格里靠 <br> 保位
+            return
+
+        if tag in self._BLOCK_TAGS:
+            if self._kind == "cell":
+                # 格子里的 <p>/<h*> 不另起块,否则一格会被拆成多格;
+                # 但补一个空格,免得两段文字直接粘连。
+                if self._buf is not None:
+                    self._buf += " "
+                return
             if self._buf is not None:  # 上一段没闭合就开了新段:先结算
                 self._flush()
             self._buf = ""
@@ -342,7 +491,24 @@ class PaperHTMLParser(HTMLParser):
             if tag == self._skip[-1]:
                 self._skip.pop()
             return
-        if tag in ("h1", "h2", "h3", "h4", "h5", "h6", "p", "figcaption"):
+        if tag == "table":
+            if self._table_depth == 1:
+                self._end_cell()
+                self._end_row()
+                self._flush_table()
+            self._table_depth = max(0, self._table_depth - 1)
+            return
+        if self._table_depth == 1:
+            if tag in ("td", "th"):
+                self._end_cell()
+                return
+            if tag == "tr":
+                self._end_cell()
+                self._end_row()
+                return
+        if tag in self._BLOCK_TAGS:
+            if self._kind == "cell":
+                return
             if self._buf is not None:
                 self._flush()
 
@@ -352,11 +518,49 @@ class PaperHTMLParser(HTMLParser):
             return
         self._buf += data
 
+    # ---- 表格收集的三个收尾动作 ----
+    def _end_cell(self):
+        """结束当前单元格:把缓冲结算进当前行。"""
+        if self._kind == "cell":
+            if self._buf is not None:
+                self._flush()
+            self._kind = "p"
+
+    def _end_row(self):
+        """结束当前行:非空行才入表,避免 <tr> 里的空白产生幽灵行。"""
+        if self._table is not None and any(self._table["row"]):
+            self._table["rows"].append(self._table["row"])
+        if self._table is not None:
+            self._table["row"] = []
+
+    def _flush_table(self):
+        """表格结束:公式表拆成 formula 块,单列表格转代码块,其余转 Markdown。"""
+        table, self._table = self._table, None
+        if not table or not table["rows"]:
+            return
+        if table["equation"]:
+            for eq in render_equation_rows(table["rows"]):
+                self.blocks.append(("formula", eq))
+            return
+        if max(len(r) for r in table["rows"]) == 1:
+            code = render_code_block(table["rows"])
+            if code:
+                self.blocks.append(("verbatim", code))
+            return
+        md = render_table(table["rows"])
+        if md:
+            self.blocks.append(("table", md))
+
     def _flush(self):
         """结束一个区块:压缩空白、按类型过滤噪声后存入结果。"""
         text = re.sub(r"\s+", " ", self._buf or "").strip()
         kind, self._buf = self._kind, None
-        if kind == "h":
+        if kind == "cell":
+            # 单元格不做长度过滤("1.2" 这种短值也要留);竖线转义推迟到
+            # 渲染期,因为单列表格会走代码块输出、那时不需要转义。
+            if self._table is not None:
+                self._table["row"].append(text)
+        elif kind == "h":
             if text:
                 self.blocks.append(("h", text))
         elif kind == "cap":
@@ -390,7 +594,7 @@ def fetch_paper_html(arxiv_id: str) -> tuple[str, str]:
 
 
 def parse_blocks(html: str) -> list[tuple[str, str]]:
-    """HTML → 区块序列。
+    """HTML → 区块序列(kind 为 h/p/table/formula/image)。
 
     先做字符串级裁剪:只保留 <div class="ltx_page_main">(论文正文容器)
     到页脚之间的部分,把 ar5iv/arxiv 页面的导航按钮、页脚等噪声整个
@@ -408,7 +612,9 @@ def parse_blocks(html: str) -> list[tuple[str, str]]:
     p.feed(html)
     # Some arXiv HTML variants use malformed/lazy-loaded image markup that
     # HTMLParser may skip. Recover image sources from the same main-content HTML.
-    if not any(kind == "image" for kind, _ in p.blocks):
+    # 用解析期见过的 <img> 计数判断,而不是看结果里有没有 image 块——表格内的
+    # 图片现在是内联进单元格的,按结果判断会误触发兜底、把图重复加一遍。
+    if p.img_count == 0:
         for match in re.finditer(r"<img\b([^>]*)>", html, re.I | re.S):
             attrs = dict(re.findall(r'''([\w:-]+)\s*=\s*["']([^"']*)["']''', match.group(1)))
             src = (attrs.get("src") or attrs.get("data-src") or
@@ -440,12 +646,59 @@ def _split_for_translate(text: str, limit: int = 1200) -> list[str]:
     return pieces
 
 
-def translate_one(text: str) -> str:
-    """翻译一段英文;接口重试 3 次(退避 2/4/6 秒),全部失败则抛异常。
+def _translate_google(text: str) -> str:
+    """Google 免费网页接口。免 Key,但返回格式有两种形态,都做兼容。"""
+    out = []
+    for piece in _split_for_translate(text):
+        url = GOOGLE_TRANSLATE_URL + urllib.parse.quote(piece)
+        data = json.loads(http_get(url, timeout=30).decode("utf-8"))
+        if isinstance(data, list):
+            out.append("".join(x if isinstance(x, str) else x[0] for x in data))
+        elif isinstance(data, dict):
+            out.append(data.get("sentences", [{}])[0].get("trans", ""))
+    return "".join(out).strip()
 
-    接口返回格式有两种形态(列表或字典),都做了兼容。长段先分块,
-    各块分别翻译后按顺序拼接——所以译文的句间衔接可能生硬,这是
-    免费 Sentence-level MT 的固有局限。
+
+def _translate_openai(text: str) -> str:
+    """OpenAI 兼容的 /chat/completions 接口(OpenAI / DeepSeek / vLLM / Ollama)。
+
+    用系统提示把模型约束成"只输出译文"的翻译器,temperature=0 保证可复现。
+    """
+    if not TRANSLATE_API_KEY:
+        raise RuntimeError("openai 后端需要 TRANSLATE_API_KEY(或 --translate-api-key)")
+    url = OPENAI_BASE_URL.rstrip("/") + "/chat/completions"
+    out = []
+    for piece in _split_for_translate(text, limit=OPENAI_CHUNK_LIMIT):
+        payload = {
+            "model": OPENAI_MODEL,
+            "temperature": 0,
+            "messages": [
+                {"role": "system",
+                 "content": "你是学术论文翻译助手。把用户给出的英文段落译成简体中文:"
+                            "保持学术语气,术语准确,不要增删内容,不要解释或加注,"
+                            "只输出译文本身。"},
+                {"role": "user", "content": piece},
+            ],
+        }
+        raw = http_post_json(url, payload,
+                             {"Authorization": f"Bearer {TRANSLATE_API_KEY}"},
+                             timeout=120)
+        data = json.loads(raw.decode("utf-8"))
+        out.append(data["choices"][0]["message"]["content"].strip())
+    return "".join(out)
+
+
+BACKENDS = {"google": _translate_google, "openai": _translate_openai}
+
+
+def translate_one(text: str) -> str:
+    """翻译一段英文,返回译文;重试若干次后仍失败则抛 RuntimeError。
+
+    公式先替换成 __FORMULA_n__ 占位符,译完再原样还原,避免翻译服务改写
+    LaTeX 命令或符号。具体走哪个后端由 TRANSLATE_BACKEND 决定。
+
+    注意:失败必须抛异常而不是返回占位文本——调用方据此决定不写缓存,
+    否则一次网络抖动会在缓存里留下永久伤疤。
     """
     # Protect LaTeX from the translation service, which may otherwise remove
     # commands or rewrite symbols. Restore the exact source after translation.
@@ -454,26 +707,24 @@ def translate_one(text: str) -> str:
         formulas.append(match.group(0))
         return f" __FORMULA_{len(formulas) - 1}__ "
     protected = re.sub(r"\$\$.*?\$\$|\$[^$\n]+\$", protect, text, flags=re.S)
+
+    backend = BACKENDS.get(TRANSLATE_BACKEND)
+    if backend is None:
+        raise RuntimeError(f"未知翻译后端: {TRANSLATE_BACKEND}(可选 google/openai)")
+
     last_err = None
-    for attempt in range(3):
+    for attempt in range(TRANSLATE_RETRIES):
         try:
-            out = []
-            for piece in _split_for_translate(protected):
-                url = TRANSLATE_URL + urllib.parse.quote(piece)
-                data = json.loads(http_get(url, timeout=30).decode("utf-8"))
-                if isinstance(data, list):
-                    out.append("".join(
-                        x if isinstance(x, str) else x[0] for x in data
-                    ))
-                elif isinstance(data, dict):
-                    out.append(data.get("sentences", [{}])[0].get("trans", ""))
-            translated = "".join(out).strip()
+            translated = backend(protected)
+            if not translated:
+                raise ValueError("后端返回空译文")
             for i, formula in enumerate(formulas):
                 translated = translated.replace(f"__FORMULA_{i}__", formula)
             return translated
         except Exception as e:
             last_err = e
-            time.sleep(2 * (attempt + 1))
+            if attempt < TRANSLATE_RETRIES - 1:
+                time.sleep(2 * (attempt + 1))
     raise RuntimeError(f"翻译失败: {last_err}")
 
 
@@ -483,6 +734,9 @@ def build_bilingual(arxiv_id: str, reg: dict) -> Path | None:
     五步:登记条目 → 读缓存 → 翻译缺的段落 → 拼装 Markdown → 回写
     缓存与登记表。缓存以"英文原文"为 key,所以改输出格式、加纠错词条
     都不用重新翻译,重跑秒级完成。
+
+    只有成功的译文才写进缓存:失败的段落仅在本次渲染时标 ⚠,重跑会自动
+    重试。表格与公式不进缓存(它们不参与翻译)。
     """
     known = {p["id"]: p for p in reg["papers"]}
     if arxiv_id in known:
@@ -497,24 +751,39 @@ def build_bilingual(arxiv_id: str, reg: dict) -> Path | None:
     out_dir = BILINGUAL_DIR / sanitize(entry.get("category", "未分类"))
     out_dir.mkdir(parents=True, exist_ok=True)
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    cache_file = CACHE_DIR / f"{arxiv_id}.json"
+    # 缓存按后端分文件:不同后端译文质量不同,混用会让"换后端重译"失效。
+    # google 沿用旧的 {id}.json 命名,既有缓存可直接复用、不必重译。
+    cache_file = (CACHE_DIR / f"{arxiv_id}.json" if TRANSLATE_BACKEND == "google"
+                  else CACHE_DIR / f"{arxiv_id}.{TRANSLATE_BACKEND}.json")
     cache = json.loads(cache_file.read_text(encoding="utf-8")) if cache_file.exists() else {}
+    # 清掉历史遗留的失败占位:早期版本会把 "⚠ ..." 写进缓存,导致这些段落
+    # 永远被当成"已翻译"。删掉即视为未命中,本次会自动重试。
+    stale = [k for k, v in cache.items() if isinstance(v, str) and v.startswith(FAIL_MARK)]
+    for k in stale:
+        del cache[k]
+    if stale:
+        log(f"  清理 {len(stale)} 条历史失败缓存,本次重试")
     out_file = out_dir / f"{arxiv_id} 中英对照.md"
 
     # 1) 抓 HTML 并解析
     log(f"* 抓取 {arxiv_id} 的 HTML 版...")
     html, source = fetch_paper_html(arxiv_id)
     blocks = parse_blocks(html)
-    n_paras = sum(1 for k, _ in blocks if k != "h")
-    log(f"  来源 {source},共 {len(blocks)} 个区块(正文段 {n_paras})")
+    n_paras = sum(1 for k, _ in blocks if k == "p")
+    n_tables = sum(1 for k, _ in blocks if k == "table")
+    n_verbatim = sum(1 for k, _ in blocks if k == "verbatim")
+    log(f"  来源 {source},共 {len(blocks)} 个区块"
+        f"(正文段 {n_paras}、表格 {n_tables}、原文块 {n_verbatim})")
 
-    # 2) 只翻译缓存里没有的段落;失败的段落记为 ⚠ 而不是中断整篇
+    # 2) 只翻译缓存里没有的段落。失败只记在内存里、不写缓存,否则下次重跑
+    #    会因为"缓存命中"而永远跳过它——一次网络抖动就留下永久疤痕。
+    failures: dict[str, str] = {}
     todo = [t for kind, t in blocks if kind in ("h", "p") and t not in cache]
     for i, t in enumerate(todo, 1):
         try:
             cache[t] = translate_one(t)
         except RuntimeError as e:
-            cache[t] = "⚠ " + str(e)
+            failures[t] = str(e)
         if i % 10 == 0 or i == len(todo):
             log(f"  翻译进度 {i}/{len(todo)}")
         time.sleep(0.4)  # 免费接口,温柔一点
@@ -526,19 +795,35 @@ def build_bilingual(arxiv_id: str, reg: dict) -> Path | None:
         try:
             cache[title_key] = translate_one(title)
         except RuntimeError as e:
-            cache[title_key] = "⚠ " + str(e)
+            failures[title_key] = str(e)
         time.sleep(0.4)
+
+    def zh_of(key: str) -> str:
+        """取译文:命中缓存用缓存,否则用本次的失败提示(失败不会写进缓存)。"""
+        if key in cache:
+            return fix_acronyms(cache[key]).replace("\n", " ")
+        err = failures.get(key)
+        return f"{FAIL_MARK} 翻译失败:{err}" if err else ""
 
     # 4) 拼装 Markdown:英文段在上,中文以引用块(>) 缀其下,
     #    章节标题译成斜体——阅读时先裸读英文,再向下扫译文校准
-    lines = [f"# {title}", "", f"> **{fix_acronyms(cache[title_key])}**", "",
+    lines = [f"# {title}", "", f"> **{zh_of(title_key)}**", "",
               f"> 原文: https://arxiv.org/abs/{arxiv_id}", "",
-              "> 用法:先裸读英文段,再对照斜体译文校对;⭐ 标记值得收进 glossary 的表达。", "",
+              "> 用法:先裸读英文段,再对照下方引用块中的译文校准。", "",
               "---", ""]
     for kind, text in blocks:
         if kind == "h" and text.strip().lower() == title.strip().lower():
             continue  # 正文首个标题与 H1 重复,跳过
-        zh = SECTION_ZH.get(text.strip()) or fix_acronyms(cache.get(text, "")).replace("\n", " ")
+        if kind == "table":
+            # 表格按原文保留、不翻译:里面多是数字与模型名,逐格机翻既容易
+            # 破坏表结构,对阅读也没什么帮助。保留数据本身才是重点。
+            lines += ["【表格】", "", text, ""]
+            continue
+        if kind == "verbatim":
+            # 单列表格(prompt 模板/代码清单),同样原样保留不翻译。
+            lines += ["【原文块】", "", text, ""]
+            continue
+        zh = SECTION_ZH.get(text.strip()) or zh_of(text)
         if kind == "h":
             lines += [f"## {text}", f"*{zh}*" if zh else "", ""]
         elif kind == "formula":
@@ -556,6 +841,8 @@ def build_bilingual(arxiv_id: str, reg: dict) -> Path | None:
     entry["bilingual"] = str(out_file.relative_to(BASE))
     save_registry(reg)
     log(f"✓ 已生成 {out_file.relative_to(BASE)}")
+    if failures:
+        log(f"  ! {len(failures)} 段翻译失败,已跳过且未写入缓存(重跑会自动重试)")
     return out_file
 
 
@@ -577,10 +864,28 @@ def main() -> int:
                     help="HTTP 代理,如 http://127.0.0.1:7897(也可用环境变量 HTTPS_PROXY)")
     ap.add_argument("-b", "--bilingual", default=None, metavar="ID|all",
                     help="为指定论文(或 all=全部)生成中英对照阅读材料")
+    ap.add_argument("-t", "--translator", default=None, choices=["google", "openai"],
+                    help="翻译后端:google=免费网页接口(默认) / "
+                         "openai=OpenAI 兼容接口")
+    ap.add_argument("--translate-base-url", default=None,
+                    help="openai 后端的 API 地址,如 https://api.deepseek.com/v1")
+    ap.add_argument("--translate-model", default=None,
+                    help="openai 后端的模型名,如 deepseek-chat")
+    ap.add_argument("--translate-api-key", default=None,
+                    help="openai 后端的 API Key(建议改用环境变量 TRANSLATE_API_KEY)")
     args = ap.parse_args()
 
-    global PROXY
+    global PROXY, TRANSLATE_BACKEND, OPENAI_BASE_URL, OPENAI_MODEL, TRANSLATE_API_KEY
     PROXY = args.proxy or os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+
+    # 翻译配置:命令行优先于环境变量,环境变量优先于内置默认值。
+    TRANSLATE_BACKEND = (args.translator or os.environ.get("TRANSLATE_BACKEND")
+                         or TRANSLATE_BACKEND).strip().lower()
+    OPENAI_BASE_URL = (args.translate_base_url or os.environ.get("TRANSLATE_BASE_URL")
+                       or OPENAI_BASE_URL)
+    OPENAI_MODEL = (args.translate_model or os.environ.get("TRANSLATE_MODEL")
+                    or OPENAI_MODEL)
+    TRANSLATE_API_KEY = (args.translate_api_key or os.environ.get("TRANSLATE_API_KEY"))
 
     reg = load_registry()
     known = {p["id"]: p for p in reg["papers"]}
