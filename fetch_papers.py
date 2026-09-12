@@ -123,17 +123,25 @@ def save_registry(reg: dict) -> None:
 # ---------------------------------------------------------------------------
 # arXiv 元数据
 # ---------------------------------------------------------------------------
+# arXiv 的两代 id 格式:新版 0704.0001 式,旧版 cs/0703045 式
+# (archive 小写,可带 - 与 .子类,如 hep-th、cond-mat、math.GT、astro-ph)
+NEW_ID = r"[0-9]{4}\.[0-9]{4,5}"
+OLD_ID = r"[a-z][a-z\-]*(?:\.[A-Za-z]{2})?/[0-9]{7}"
+
+
 def parse_arxiv_id(text: str) -> str | None:
     """从各种输入形态提取 arXiv id(如 '2501.12948'),认不出返回 None。
 
-    兼容: 裸 id '2501.12948v2' / abs 链接 / pdf 链接。
-    两个正则的区别:fullmatch 要求整串完全匹配(裸 id),search 允许嵌在 URL 里。
+    兼容:新版裸 id '2501.12948v2'、旧版 id 'cs/0703045' / 'hep-th/9901001' /
+    'math.GT/0309136',以及 abs / pdf 链接。返回时统一去掉版本后缀 vN。
+    两个正则的区别:search 允许嵌在 URL 里,fullmatch 要求整串完全匹配。
     """
     text = text.strip()
-    m = re.search(r"arxiv\.org/(?:abs|pdf)/([0-9]{4}\.[0-9]{4,5})(v\d+)?", text, re.I)
+    idpat = f"(?:{NEW_ID}|{OLD_ID})"
+    m = re.search(rf"arxiv\.org/(?:abs|pdf)/({idpat})(v\d+)?", text, re.I)
     if m:
         return m.group(1)
-    m = re.fullmatch(r"([0-9]{4}\.[0-9]{4,5})(v\d+)?", text)
+    m = re.fullmatch(rf"({idpat})(v\d+)?", text)
     if m:
         return m.group(1)
     return None
@@ -158,10 +166,15 @@ def fetch_metadata(arxiv_id: str) -> dict | None:
         title = re.sub(r"\s+", " ", entry.findtext(f"{ATOM}title", "").strip())
         if not title:
             raise ValueError("title 为空")
-        authors = [
-            a.findtext(f"{ATOM}name", "").strip()
-            for a in entry.findall(f"{ATOM}author")
-        ]
+        # arXiv API 偶尔会重复返回同一个作者——实测 2501.12948 返回 200 个名字,
+        # 其中 'Shengfeng Ye'、'Yanhong Xu' 各出现两次。按首次出现顺序去重。
+        seen: set[str] = set()
+        authors = []
+        for node in entry.findall(f"{ATOM}author"):
+            name = node.findtext(f"{ATOM}name", "").strip()
+            if name and name not in seen:
+                seen.add(name)
+                authors.append(name)
         published = entry.findtext(f"{ATOM}published", "")[:4]  # '2025-01-...' -> '2025'
         return {"title": title, "authors": authors,
                 "year": published or "unknown", "id": arxiv_id}

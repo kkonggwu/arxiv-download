@@ -354,6 +354,34 @@ ATOM_XML = """<?xml version="1.0" encoding="UTF-8"?>
 </feed>"""
 
 
+class TestArxivIds(unittest.TestCase):
+    def test_new_style(self):
+        self.assertEqual(fp.parse_arxiv_id("2501.12948"), "2501.12948")
+        self.assertEqual(fp.parse_arxiv_id("2501.12948v2"), "2501.12948")
+        self.assertEqual(fp.parse_arxiv_id("  2501.12948  "), "2501.12948")
+
+    def test_links(self):
+        self.assertEqual(
+            fp.parse_arxiv_id("https://arxiv.org/abs/2405.15793"), "2405.15793")
+        self.assertEqual(
+            fp.parse_arxiv_id("https://arxiv.org/pdf/2405.15793v1"), "2405.15793")
+
+    def test_old_style(self):
+        # 旧版 id 是 archive/YYMMNNN,2022 年以前的老论文都用这种
+        self.assertEqual(fp.parse_arxiv_id("cs/0703045"), "cs/0703045")
+        self.assertEqual(fp.parse_arxiv_id("hep-th/9901001"), "hep-th/9901001")
+        self.assertEqual(fp.parse_arxiv_id("math.GT/0309136"), "math.GT/0309136")
+        self.assertEqual(fp.parse_arxiv_id("cond-mat/0102536"), "cond-mat/0102536")
+
+    def test_old_style_link(self):
+        self.assertEqual(
+            fp.parse_arxiv_id("https://arxiv.org/abs/cs/0703045"), "cs/0703045")
+
+    def test_unrecognized(self):
+        for bad in ("", "not-an-id", "2501", "1706.03762/extra", "cs/123"):
+            self.assertIsNone(fp.parse_arxiv_id(bad), bad)
+
+
 class TestMetadata(unittest.TestCase):
     """元数据取不到时不能把占位文件名固化进登记表。"""
 
@@ -372,6 +400,19 @@ class TestMetadata(unittest.TestCase):
         xml = ATOM_XML.replace("Attention Is All You Need", "")
         with mock.patch.object(fp, "http_get", return_value=xml.encode()):
             self.assertIsNone(fp.fetch_metadata("1706.03762"))
+
+    def test_duplicate_authors_are_deduped_in_order(self):
+        # arXiv API 实测会重复返回同一个作者(2501.12948 返回 200 个名字,
+        # 其中两个各出现两次),按首次出现顺序去重
+        xml = ATOM_XML.replace(
+            "<author><name>Noam Shazeer</name></author>",
+            "<author><name>Noam Shazeer</name></author>"
+            "<author><name>Ashish Vaswani</name></author>"
+            "<author><name>Noam Shazeer</name></author>")
+        with mock.patch.object(fp, "http_get", return_value=xml.encode()):
+            meta = fp.fetch_metadata("1706.03762")
+        self.assertEqual(meta["authors"],
+                         ["Ashish Vaswani", "Noam Shazeer"])
 
     def test_resolve_entry_omits_file_when_metadata_fails(self):
         with mock.patch.object(fp, "http_get", side_effect=OSError("boom")):
