@@ -6,10 +6,11 @@ os.environ(重构前必须这么做)。
 
 import tempfile
 import unittest
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 
-from tests.helpers import bootstrap  # noqa: F401
 from paperkit.config import PROJECT_ROOT, Settings
+from tests.helpers import bootstrap  # noqa: F401
 
 ENV = {
     "HTTPS_PROXY": "http://env-proxy",
@@ -79,7 +80,9 @@ class TestDerivedPaths(unittest.TestCase):
         self.assertEqual(openai.cache_file("1").name, "1.openai.json")
 
     def test_settings_is_frozen(self):
-        with self.assertRaises(Exception):
+        # 断言具体的 FrozenInstanceError,不用 assertRaises(Exception):
+        # 后者连属性名拼错抛出的 AttributeError 都会算作通过。
+        with self.assertRaises(FrozenInstanceError):
             self.settings.proxy = "http://changed"
 
 

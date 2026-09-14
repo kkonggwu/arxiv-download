@@ -2,12 +2,11 @@
 
 import tempfile
 import unittest
-from pathlib import Path
 from unittest import mock
 
-from tests.helpers import bootstrap, make_settings  # noqa: F401
 from paperkit.services import images
 from paperkit.services.images import asset_relpath, localize_images
+from tests.helpers import bootstrap, make_settings  # noqa: F401
 
 PID = "1234.56789"
 BASE = "https://arxiv.org/html/"

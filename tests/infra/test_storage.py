@@ -3,13 +3,12 @@
 原子写是防「半截 JSON」的:缓存每 20 段落盘一次,而中断正是本项目的高频场景。
 """
 
-import json
 import tempfile
 import unittest
 from pathlib import Path
 
-from tests.helpers import bootstrap  # noqa: F401
 from paperkit.infra.storage import RegistryStore, write_text_atomic
+from tests.helpers import bootstrap  # noqa: F401
 
 
 class TestWriteTextAtomic(unittest.TestCase):

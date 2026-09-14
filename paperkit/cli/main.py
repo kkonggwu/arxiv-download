@@ -17,9 +17,18 @@ import time
 from ..config import Settings
 from ..errors import PaperKitError
 from ..infra.logging import log
-from ..services import (build_bilingual, download_entry, ensure_metadata,
-                        is_generated, load_registry, paper_rows, resolve_entry,
-                        save_registry, summary_line, target_ids)
+from ..services import (
+    build_bilingual,
+    download_entry,
+    ensure_metadata,
+    is_generated,
+    load_registry,
+    paper_rows,
+    resolve_entry,
+    save_registry,
+    summary_line,
+    target_ids,
+)
 
 EPILOG = """示例:
   papers --all                       下载清单中所有未落盘论文

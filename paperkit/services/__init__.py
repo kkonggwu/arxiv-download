@@ -6,8 +6,7 @@
 """
 
 from .bilingual import build_bilingual, is_generated, target_ids
-from .download import (download_entry, download_pdf, ensure_metadata,
-                       resolve_entry)
+from .download import download_entry, download_pdf, ensure_metadata, resolve_entry
 from .images import asset_relpath, localize_images
 from .listing import paper_rows, summary_line
 from .registry import load_registry, save_registry

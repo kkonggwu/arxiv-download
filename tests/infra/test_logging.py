@@ -4,8 +4,8 @@ import io
 import unittest
 from unittest import mock
 
-from tests.helpers import bootstrap  # noqa: F401
 from paperkit.infra.logging import log
+from tests.helpers import bootstrap  # noqa: F401
 
 
 class TestLogging(unittest.TestCase):

@@ -9,8 +9,8 @@ import unittest
 import urllib.request
 from unittest import mock
 
-from tests.helpers import bootstrap  # noqa: F401
 from paperkit.infra.http import UrllibTransport, http_get, http_post_json
+from tests.helpers import bootstrap  # noqa: F401
 
 
 class _FakeResponse:

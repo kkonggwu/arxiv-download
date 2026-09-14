@@ -5,9 +5,8 @@ LaTeXML 用同一套 h1–h6 承载所有层级,靠 class 区分,不能只看标
 
 import unittest
 
+from paperkit.domain import heading_level, parse_blocks, render_code_block, render_table
 from tests.helpers import bootstrap  # noqa: F401
-from paperkit.domain import (heading_level, parse_blocks, render_code_block,
-                             render_table)
 
 
 class TestHeadingLevels(unittest.TestCase):

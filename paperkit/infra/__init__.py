@@ -5,7 +5,6 @@
     infra **不得**依赖 services / cli
 """
 
-from . import (arxiv_api, cache, http, logging,  # noqa: F401
-               storage, translate)
+from . import arxiv_api, cache, http, logging, storage, translate  # noqa: F401
 
 __all__ = ["arxiv_api", "cache", "http", "logging", "storage", "translate"]

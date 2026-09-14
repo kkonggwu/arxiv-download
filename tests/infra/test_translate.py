@@ -4,12 +4,12 @@ import json
 import unittest
 from unittest import mock
 
-from tests.helpers import FakeTranslator, bootstrap, echo_translator  # noqa: F401
 from paperkit.config import Settings
 from paperkit.errors import TranslateError
 from paperkit.infra import translate
 from paperkit.infra.translate import google, openai
 from paperkit.infra.translate.base import protect_formulas, retrying_translate
+from tests.helpers import FakeTranslator, bootstrap, echo_translator  # noqa: F401
 
 
 class TestFormulaProtection(unittest.TestCase):
@@ -38,15 +38,13 @@ class TestRetrySemantics(unittest.TestCase):
         self.assertEqual(retrying_translate(echo_translator("你好"), "hi", 3), "你好")
 
     def test_empty_translation_is_treated_as_failure(self):
-        with mock.patch("time.sleep"):
-            with self.assertRaises(TranslateError):
-                retrying_translate(FakeTranslator(lambda t: ""), "hi", 2)
+        with mock.patch("time.sleep"), self.assertRaises(TranslateError):
+            retrying_translate(FakeTranslator(lambda t: ""), "hi", 2)
 
     def test_retries_then_raises_translate_error(self):
         translator = FakeTranslator(lambda t: (_ for _ in ()).throw(OSError("net")))
-        with mock.patch("time.sleep") as sleeper:
-            with self.assertRaises(TranslateError):
-                retrying_translate(translator, "hi", retries=3)
+        with mock.patch("time.sleep") as sleeper, self.assertRaises(TranslateError):
+            retrying_translate(translator, "hi", retries=3)
         self.assertEqual(len(translator.calls), 3)
         self.assertEqual(sleeper.call_count, 2)     # 最后一次失败后不再等待
 

@@ -9,10 +9,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.helpers import bootstrap, make_settings  # noqa: F401
 from paperkit.services import download
-from paperkit.services.download import (download_entry, download_pdf,
-                                        ensure_metadata, resolve_entry)
+from paperkit.services.download import download_entry, download_pdf, ensure_metadata, resolve_entry
+from tests.helpers import bootstrap, make_settings  # noqa: F401
 
 ATOM_XML = """<?xml version="1.0" encoding="UTF-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom">

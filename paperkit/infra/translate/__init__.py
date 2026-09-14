@@ -5,7 +5,7 @@
 重构前这一步要改 5 处并新增一个模块级全局。
 """
 
-from typing import Callable
+from collections.abc import Callable
 
 from ...config import Settings
 from ...errors import TranslateError

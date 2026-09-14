@@ -5,17 +5,16 @@ run() 的 argv / env / base_dir 都可注入,所以可以完整驱动一遍而�
 """
 
 import io
-import json
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from tests.helpers import bootstrap  # noqa: F401
 from paperkit.cli import build_parser, run
 from paperkit.cli.main import _summary
 from paperkit.infra.storage import RegistryStore
+from tests.helpers import bootstrap  # noqa: F401
 
 
 def capture(fn, *args, **kwargs) -> tuple[int, str]:

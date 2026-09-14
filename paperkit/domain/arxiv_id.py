@@ -6,7 +6,6 @@
 
 import re
 
-
 # arXiv 的两代 id 格式(archive 小写,可带 - 与 .子类,如 hep-th、math.GT)
 NEW_ID = r"[0-9]{4}\.[0-9]{4,5}"
 OLD_ID = r"[a-z][a-z\-]*(?:\.[A-Za-z]{2})?/[0-9]{7}"

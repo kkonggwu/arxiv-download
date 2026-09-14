@@ -7,8 +7,8 @@
 
 import unittest
 
-from tests.helpers import PARA, bootstrap, wrap  # noqa: F401
 from paperkit.domain import parse_blocks
+from tests.helpers import PARA, bootstrap, wrap  # noqa: F401
 
 
 class TestTableParsing(unittest.TestCase):

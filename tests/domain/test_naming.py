@@ -2,8 +2,8 @@
 
 import unittest
 
-from tests.helpers import bootstrap  # noqa: F401  (触发 sys.path 引导)
 from paperkit.domain import make_filename, sanitize
+from tests.helpers import bootstrap  # noqa: F401  (触发 sys.path 引导)
 
 
 class TestSanitize(unittest.TestCase):

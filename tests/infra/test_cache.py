@@ -5,8 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.helpers import bootstrap  # noqa: F401
 from paperkit.infra.cache import TranslationCache
+from tests.helpers import bootstrap  # noqa: F401
 
 FAIL = "⚠"
 

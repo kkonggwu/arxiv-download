@@ -8,14 +8,19 @@
 import json
 import tempfile
 import unittest
-from pathlib import Path
 from unittest import mock
 
-from tests.helpers import (PARA, FakeTranslator, bootstrap,  # noqa: F401
-                           echo_translator, failing_translator, make_settings,
-                           wrap)
 from paperkit.services import bilingual
 from paperkit.services.bilingual import build_bilingual
+from tests.helpers import (  # noqa: F401
+    PARA,
+    FakeTranslator,
+    bootstrap,
+    echo_translator,
+    failing_translator,
+    make_settings,
+    wrap,
+)
 
 PID = "1234.56789"
 
@@ -176,10 +181,9 @@ class TestBilingualCache(unittest.TestCase):
 
         with mock.patch.object(bilingual, "fetch_paper_html",
                                return_value=(html, "test", "https://x/")), \
-             mock.patch("time.sleep"):
-            with self.assertRaises(KeyboardInterrupt):
-                build_bilingual(PID, self.reg, self.settings,
-                                translator=FakeTranslator(flaky))
+             mock.patch("time.sleep"), self.assertRaises(KeyboardInterrupt):
+            build_bilingual(PID, self.reg, self.settings,
+                            translator=FakeTranslator(flaky))
 
         self.assertEqual(len(self._cache()), flush_every)
 

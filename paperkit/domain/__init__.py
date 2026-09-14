@@ -9,8 +9,14 @@
 from .arxiv_id import NEW_ID, OLD_ID, parse_arxiv_id
 from .glossary import ACRONYM_FIX, SECTION_ZH, fix_acronyms
 from .html_parser import MIN_PARA_CHARS, PaperHTMLParser, parse_blocks
-from .markdown import (SKIP_TITLE_CLASS, TITLE_LEVEL, heading_level,
-                       render_code_block, render_equation_rows, render_table)
+from .markdown import (
+                       SKIP_TITLE_CLASS,
+                       TITLE_LEVEL,
+                       heading_level,
+                       render_code_block,
+                       render_equation_rows,
+                       render_table,
+)
 from .naming import make_filename, sanitize
 
 __all__ = [

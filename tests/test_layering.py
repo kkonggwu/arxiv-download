@@ -150,10 +150,10 @@ class TestDomainPurity(unittest.TestCase):
                         if alias.name in self.FORBIDDEN_MODULES:
                             violations.append(
                                 f"{path.name}:{node.lineno} import {alias.name}")
-                elif isinstance(node, ast.ImportFrom) and node.module:
-                    if node.module in self.FORBIDDEN_MODULES:
-                        violations.append(
-                            f"{path.name}:{node.lineno} from {node.module}")
+                elif (isinstance(node, ast.ImportFrom)
+                      and node.module in self.FORBIDDEN_MODULES):
+                    violations.append(
+                        f"{path.name}:{node.lineno} from {node.module}")
         self.assertEqual(violations, [], "\n".join(violations))
 
     def test_domain_does_not_call_io_functions(self):

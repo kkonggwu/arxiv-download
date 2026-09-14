@@ -6,8 +6,7 @@
 import re
 from html.parser import HTMLParser
 
-from .markdown import (heading_level, render_code_block,
-                       render_equation_rows, render_table)
+from .markdown import heading_level, render_code_block, render_equation_rows, render_table
 
 MIN_PARA_CHARS = 40  # 短于此的段落视为导航/噪声,丢弃
 
@@ -78,9 +77,8 @@ class PaperHTMLParser(HTMLParser):
         """判断某标签子树是否整体不要(脚本/样式/参考文献)。"""
         if tag in ("script", "style", "svg", "noscript"):
             return True
-        if "ltx_bibliograph" in attrs.get("class", ""):
-            return True
-        return False
+        # 参考文献整体跳过:正文里的 [12] 目前回溯不到条目,留着反而误导
+        return "ltx_bibliograph" in attrs.get("class", "")
 
     def handle_starttag(self, tag, attrs):
         a = dict(attrs)

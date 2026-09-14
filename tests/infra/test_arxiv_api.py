@@ -10,9 +10,9 @@ import urllib.error
 from contextlib import redirect_stdout
 from unittest import mock
 
-from tests.helpers import bootstrap  # noqa: F401
 from paperkit.errors import SourceUnavailable
 from paperkit.infra import arxiv_api
+from tests.helpers import bootstrap  # noqa: F401
 
 ATOM_XML = """<?xml version="1.0" encoding="UTF-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom">
@@ -121,15 +121,14 @@ class TestFetchPaperHtml(unittest.TestCase):
     def test_both_sources_down_raises_source_unavailable(self):
         # 不可重试的语义:纯扫描版 PDF 重跑一万次也一样
         with mock.patch.object(arxiv_api, "http_get",
-                               side_effect=OSError("down")):
-            with self.assertRaises(SourceUnavailable):
-                arxiv_api.fetch_paper_html("1706.03762")
+                               side_effect=OSError("down")), self.assertRaises(SourceUnavailable):
+            arxiv_api.fetch_paper_html("1706.03762")
 
     def test_page_without_body_falls_through(self):
         with mock.patch.object(arxiv_api, "http_get",
-                               return_value=b"<html>nothing here</html>"):
-            with self.assertRaises(SourceUnavailable):
-                arxiv_api.fetch_paper_html("1706.03762")
+                               return_value=b"<html>nothing here</html>"), \
+             self.assertRaises(SourceUnavailable):
+            arxiv_api.fetch_paper_html("1706.03762")
 
 
 if __name__ == "__main__":
