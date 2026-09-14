@@ -677,3 +677,33 @@ reconfigure、`log()` 的 GBK 兜底、`write_text_atomic` 的 `Path.replace` �
 它还有个更危险的副作用:会连 `docs/` 与 README 里的 Python 片段一起重排,
 既改掉文档中的示例代码,又掩盖「文档示例与当前实现故意不一致」这类信息。
 已在 `pyproject.toml` 里用 `extend-exclude = ["*.md"]` 挡住。
+
+### 已完成:元数据 abs 页面兜底 + 已登记条目回填
+
+**起因**:经代理实测后确认,`export.arxiv.org` 的 429 是 **arXiv 侧的限流**,
+与本地网络无关——代理出口是 Oracle 印度的机房 IP,反而限得更狠(直连与走代理
+都是 429,只有主站 `arxiv.org` 稳定 200)。也就是说这个 429 等不来、也绕不过去,
+原先「等接口恢复再补标题」的计划不成立。
+
+**兜底**:`_metadata_from_abs_page()` 改从 `arxiv.org/abs/{id}` 解析。该页
+标题、作者、提交年份三样齐全,恰好就是 `make_filename()` 需要的全部信息,
+实测与 API 路径产出**完全一致**。两个易错点已写进测试:标题/作者块里的
+`<span class="descriptor">Title:</span>` 必须先整段删掉(只剥标签会留下
+「Title:」并原样进文件名);`href` 里的 `&amp;` 要走 `html.unescape`。
+
+失败方向是**安全的**:解析不出标题就返回 `None`,退化成「待补全元数据」,
+绝不会产出半成品文件名。成功路径不会多打一次网络(有测试卡住 `call_count`)。
+
+**顺带挖出的真 bug**:`_cmd_add` 里回填逻辑是 `if entry["id"] not in known`
+——只有**新**条目才入表,已登记的 id 从不更新。于是「当初限流只存了 id、
+后来元数据拿到了」这个场景下,PDF 按正确名字落了盘,登记表却永远停在半成品:
+`--list` 一直显示「待补全元数据」,`--all` 每次都要重试一遍。改成对已登记条目
+**只补缺失字段**——尤其绝不覆盖已有的 `file`:PDF 已按旧名字落盘,改掉 `file`
+就等于指向一个不存在的文件。
+
+**验证**:`2201.11903` 端到端跑通,文件名
+`2022 - Wei et al. - Chain-of-Thought Prompting Elicits Reasoning in Large
+Language Models [2201.11903].pdf`;重生成对照材料时只有标题那一段是新缓存键,
+其余 216 段与 4 张图片全部命中缓存,几秒完成。
+
+**测试**:166 → 177 项(兜底 7 项 + 回填 4 项)。

@@ -203,6 +203,71 @@ class TestBilingualMode(unittest.TestCase):
         self.assertTrue(g.call_args.kwargs["force"])
 
 
+class TestAddModeRepairsDegradedEntries(unittest.TestCase):
+    """`papers <id>` 对已登记的「半成品」条目必须能回填元数据。
+
+    背景:当初 export.arxiv.org 限流时只登记了 id,后来接口恢复(或走了
+    abs 页兜底),再跑一次 `papers <id>` 就得把标题与文件名写进登记表。
+    早期版本只在「id 不在表里」时才写入,于是 PDF 按正确名字落了盘、
+    登记表却永远停在半成品状态。
+    """
+
+    FILE = "2022 - Wei et al. - Chain-of-Thought Prompting [2201.11903].pdf"
+    META = {"id": "2201.11903", "title": "Chain-of-Thought Prompting",
+            "authors": ["Jason Wei", "Denny Zhou"], "year": "2022"}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.path = self.root / "papers.json"
+        RegistryStore(self.path).save(
+            {"papers": [{"id": "2201.11903", "category": "推理前沿"}]})
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _run(self, entry):
+        with mock.patch("paperkit.cli.main.resolve_entry", return_value=entry), \
+             mock.patch("paperkit.cli.main.download_entry",
+                        return_value="downloaded") as dl, \
+             mock.patch("time.sleep"):
+            code, out = capture(run, ["2201.11903", "-c", "推理前沿"],
+                                env={}, base_dir=self.root)
+        return code, out, dl
+
+    def test_metadata_is_written_back_to_the_registry(self):
+        code, _, _ = self._run({**self.META, "category": "推理前沿",
+                                "file": self.FILE})
+        self.assertEqual(code, 0)
+        saved = RegistryStore(self.path).load()["papers"][0]
+        self.assertEqual(saved["title"], "Chain-of-Thought Prompting")
+        self.assertEqual(saved["authors"], ["Jason Wei", "Denny Zhou"])
+        self.assertEqual(saved["file"], self.FILE)
+
+    def test_repaired_entry_is_downloaded_with_the_real_name(self):
+        _, _, dl = self._run({**self.META, "category": "推理前沿",
+                              "file": self.FILE})
+        self.assertEqual(dl.call_args.args[0]["file"], self.FILE)
+
+    def test_existing_file_is_never_overwritten(self):
+        # PDF 已按旧名字落盘;即便元数据解析出了新名字也不能改 file,
+        # 否则登记表会指向一个不存在的文件
+        RegistryStore(self.path).save({"papers": [
+            {"id": "2201.11903", "category": "推理前沿", "title": "旧标题",
+             "file": "old.pdf"}]})
+        self._run({**self.META, "category": "推理前沿", "file": "new.pdf"})
+        saved = RegistryStore(self.path).load()["papers"][0]
+        self.assertEqual(saved["file"], "old.pdf")
+        self.assertEqual(saved["title"], "旧标题")
+
+    def test_metadata_still_unavailable_keeps_the_entry_degraded(self):
+        code, out, dl = self._run({"id": "2201.11903", "category": "推理前沿"})
+        self.assertEqual(code, 0)
+        self.assertIn("元数据待补全", out)
+        self.assertFalse(dl.called)          # 没有文件名就不该下载
+        self.assertNotIn("file", RegistryStore(self.path).load()["papers"][0])
+
+
 class TestSettingsFromCli(unittest.TestCase):
     def test_translator_flag_reaches_settings(self):
         with mock.patch("paperkit.cli.main.build_bilingual") as g, \

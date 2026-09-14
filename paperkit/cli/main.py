@@ -163,10 +163,21 @@ def _cmd_add(reg: dict, settings: Settings, texts: list[str],
         entry = resolve_entry(text, category, settings)
         if entry is None:
             continue
-        if entry["id"] not in known:  # 已登记的只下载,不重复入表
+        existing = known.get(entry["id"])
+        if existing is None:
             reg["papers"].append(entry)
             known[entry["id"]] = entry
             added += 1
+        else:
+            # 已登记的条目可能是当初元数据没取到的「半成品」(只存了 id),
+            # 这次拿到了就回填——否则 PDF 按正确名字落了盘,登记表却永远
+            # 停在半成品状态:--list 一直显示「待补全元数据」,--all 每次重试。
+            # 只补缺失字段,绝不覆盖已有的 file:PDF 已按旧名字落盘,
+            # 改掉 file 就等于指向一个不存在的文件。
+            for key in ("title", "authors", "year", "file"):
+                if key not in existing and key in entry:
+                    existing[key] = entry[key]
+            entry = existing
         log(f"[{i + 1}/{len(texts)}] {entry['id']} - "
             f"{entry.get('title', '(元数据待补全)')[:60]}")
         if "file" not in entry:

@@ -931,7 +931,21 @@
     {
       "id": "2201.11903",
       "category": "推理前沿",
-      "bilingual": "papers\\双语\\推理前沿\\2201.11903 中英对照.md"
+      "bilingual": "papers\\双语\\推理前沿\\2201.11903 中英对照.md",
+      "title": "Chain-of-Thought Prompting Elicits Reasoning in Large Language Models",
+      "authors": [
+        "Jason Wei",
+        "Xuezhi Wang",
+        "Dale Schuurmans",
+        "Maarten Bosma",
+        "Brian Ichter",
+        "Fei Xia",
+        "Ed Chi",
+        "Quoc Le",
+        "Denny Zhou"
+      ],
+      "year": "2022",
+      "file": "2022 - Wei et al. - Chain-of-Thought Prompting Elicits Reasoning in Large Language Models [2201.11903].pdf"
     }
   ]
 }

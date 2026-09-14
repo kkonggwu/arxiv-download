@@ -5,6 +5,7 @@
 RuntimeError——批量任务据此决定是跳过还是重试。
 """
 
+import html
 import re
 import xml.etree.ElementTree as ET
 
@@ -14,6 +15,58 @@ from .http import http_get
 from .logging import log
 
 ATOM = "{http://www.w3.org/2005/Atom}"   # arXiv API 返回的 XML 命名空间前缀
+
+# abs 页面兜底解析用的模式。这些 class 名是 arXiv 详情页的既有结构,
+# 多年未变;真要改了,兜底会解析不出标题并返回 None,退化成「拿不到元数据」
+# 而不是产出错误的文件名——失败方向是安全的。
+_ABS_TITLE = re.compile(r'<h1 class="title[^"]*">(.*?)</h1>', re.S)
+_ABS_AUTHORS = re.compile(r'<div class="authors">(.*?)</div>', re.S)
+_ABS_ANCHOR = re.compile(r"<a\b[^>]*>(.*?)</a>", re.S)
+_ABS_SUBMITTED = re.compile(r"\[Submitted on \d{1,2} \w+ (\d{4})")
+# 标题/作者块里都有 <span class="descriptor">Title:</span> 这类标签,
+# 只剥标签会把「Title:」留在正文里,所以先整段删掉
+_DESCRIPTOR = re.compile(r'<span class="descriptor">.*?</span>', re.S)
+_TAGS = re.compile(r"<[^>]+>")
+
+
+def _plain(fragment: str) -> str:
+    """把 HTML 片段压成纯文本:去 descriptor、剥标签、还原实体、压空白。"""
+    text = _DESCRIPTOR.sub("", fragment)
+    return re.sub(r"\s+", " ", html.unescape(_TAGS.sub("", text))).strip()
+
+
+def _metadata_from_abs_page(arxiv_id: str,
+                            settings: Settings | None = None) -> dict | None:
+    """元数据 API 不可用时的兜底:改从 abs 详情页解析。
+
+    为什么要这个兜底:export.arxiv.org 的 429 是 **arXiv 侧的限流**,与本地
+    网络无关——换代理也换不掉(实测经代理出口仍是 429,机房 IP 反而限得更狠)。
+    而 arxiv.org/abs/ 页面几乎不受影响,且标题、作者、提交年份三样齐全,
+    恰好就是生成文件名所需的全部信息(见 domain/naming.make_filename)。
+
+    解析不出来就返回 None,让调用方按原样报错——**绝不能返回半成品**,
+    否则会退化成占位文件名(见 fetch_metadata 的说明)。
+    """
+    s = settings or Settings()
+    try:
+        page = http_get(f"https://arxiv.org/abs/{arxiv_id}",
+                        proxy=s.proxy).decode("utf-8", errors="replace")
+    except Exception:
+        return None
+    found = _ABS_TITLE.search(page)
+    if not found:
+        return None
+    title = _plain(found.group(1))
+    if not title:
+        return None
+    authors: list[str] = []
+    block = _ABS_AUTHORS.search(page)
+    if block:
+        authors = [a for a in (_plain(x) for x in _ABS_ANCHOR.findall(block.group(1))) if a]
+    submitted = _ABS_SUBMITTED.search(page)
+    return {"title": title, "authors": authors,
+            "year": submitted.group(1) if submitted else "unknown",
+            "id": arxiv_id}
 
 
 def fetch_metadata(arxiv_id: str, settings: Settings | None = None) -> dict | None:
@@ -49,8 +102,16 @@ def fetch_metadata(arxiv_id: str, settings: Settings | None = None) -> dict | No
         return {"title": title, "authors": authors,
                 "year": published or "unknown", "id": arxiv_id}
     except Exception as e:
-        # 429 是可重试的限流,与「论文不存在」性质不同:前者等几分钟再来就行,
-        # 后者等多久都没用。日志里说清楚,否则用户不知道该等还是该放弃。
+        # 接口挂了先走 abs 页面兜底。实测 export.arxiv.org 会长时间 429,
+        # 而 abs 页一直可用——绝大多数情况下兜底就能拿到完整元数据,
+        # 用户根本不必知道接口出过问题。
+        meta = _metadata_from_abs_page(arxiv_id, s)
+        if meta:
+            log("  i 元数据接口不可用,已从 abs 页面取到标题/作者")
+            return meta
+        # 兜底也没成,才轮到报错。429 是可重试的限流,与「论文不存在」性质
+        # 不同:前者等几分钟再来就行,后者等多久都没用。日志里说清楚,
+        # 否则用户不知道该等还是该放弃。
         if getattr(e, "code", None) == 429:
             log("  ! arXiv 元数据接口限流(429),稍后重试即可")
         else:
