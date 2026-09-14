@@ -32,6 +32,18 @@ class TestWriteTextAtomic(unittest.TestCase):
             write_text_atomic(target, "x")
             self.assertEqual(target.read_text(encoding="utf-8"), "x")
 
+    def test_writes_lf_on_every_platform(self):
+        """换行必须是 LF,否则和 .gitattributes 的 eol=lf 打架。
+
+        Path.write_text 默认会把 \\n 转成 os.linesep——Windows 上写出 CRLF,
+        于是每次 git 操作都警告「CRLF will be replaced by LF」。用
+        read_bytes 断言,避免 read_text 的通用换行模式把差异吃掉。
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "state.json"
+            write_text_atomic(target, "a\nb\n")
+            self.assertEqual(target.read_bytes(), b"a\nb\n")
+
 
 class TestRegistryStore(unittest.TestCase):
     def test_missing_file_yields_empty_skeleton(self):

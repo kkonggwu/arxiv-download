@@ -18,7 +18,10 @@ def write_text_atomic(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     try:
-        tmp.write_text(text, encoding="utf-8")
+        # newline="\n" 是必须的:默认行为会把 \n 转成 os.linesep,在 Windows 上
+        # 写出 CRLF,而 .gitattributes 声明的是 eol=lf。两边打架的结果是每次
+        # git 操作都报「CRLF will be replaced by LF」,噪音不断。
+        tmp.write_text(text, encoding="utf-8", newline="\n")
         tmp.replace(path)
     finally:
         if tmp.exists():          # 写入或替换失败时别留下垃圾
