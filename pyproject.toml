@@ -31,6 +31,10 @@ python_files = ["test_*.py"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# 不要碰 Markdown。docs/ 与 README 里的 Python 片段是给人读的说明,不是
+# 可执行代码——ruff format 会按 100 列重排它们,顺手毁掉注释对齐,还会掩盖
+# 「文档示例与当前实现刻意不一致」这类信息。
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM"]

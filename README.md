@@ -130,8 +130,14 @@ python -m unittest discover -s tests/domain -t .
 
 # 代码风格(需先 pip install -e ".[dev]")
 ruff check .
-ruff format .
+
+# 可选:统一格式。会重排现有代码(含行尾注释的对齐),建议单独提交一次
+ruff format paperkit tests
 ```
+
+注意别直接跑 `ruff format .`：它连 `docs/` 与 README 里的 Python 片段一起重排，
+会改掉文档中的示例代码。`pyproject.toml` 里已用 `extend-exclude = ["*.md"]`
+挡住这个口子，但显式指定目录更保险。
 
 测试全程不联网、不改真实数据：翻译走 `FakeTranslator` 注入，产物路径走
 `Settings(base_dir=临时目录)`。`tests/test_layering.py` 会用 AST 检查依赖
