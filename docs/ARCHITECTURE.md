@@ -647,3 +647,33 @@ P0–P4 已全部落地,提交序列 `8ace343` → `aa25d78` → `9b5c643` → `
 `paperkit/` 工作区目录(暂存区只记录了那一个文件,其余 28 个显示为未暂存的
 删除)。已用 `git checkout HEAD -- paperkit/` 完整恢复,此后改用
 `rm` + `git add -A` 记录删除。**本项目避免使用 `git rm`。**
+
+### 已完成:ruff 接入与 CI 扩矩阵
+
+**发现**:`pyproject.toml` 里 select 了 E/F/W/I/UP/B/C4/SIM 八条规则集,但 CI
+从没跑过 ruff——配了不跑等于白配。首次 `ruff check .` 报出 33 个问题(20 个
+import 排序、5 个嵌套 with、4 个未使用 import,其余 4 个是个别风格项)。29 个
+自动修,4 个手工修——其中一条值得记住:`assertRaises(Exception)` 换成具体的
+`FrozenInstanceError`,因为前者连属性名拼错抛出的 `AttributeError` 都会算作
+通过,等于这条测试没在测它声称测的东西。
+
+**CI 从 1 格扩到 4 格 + 1 个 job**:`unittest` 跑 ubuntu / windows × Python
+3.11 / 3.13(`fail-fast: false`,一个平台挂了也要能看到其他平台的结果);另加
+一个 job 装 `.[dev]`、跑 `ruff check .`、用 `papers --help` 与
+`python -m paperkit --help` 冒烟两个入口。
+
+加 Windows 不是凑数:项目里有三处平台专属代码(`main()` 的 stdout
+reconfigure、`log()` 的 GBK 兜底、`write_text_atomic` 的 `Path.replace` 与
+换行符处理),而 Windows 正是实际使用环境。**每一步都先在本地隔离 venv 里
+验证通过才写进 YAML**。补测:Python 3.11.15 上 166 项全绿,
+`requires-python = ">=3.11"` 属实。
+
+### 一处刻意不做:全库 ruff format
+
+`ruff format .` 会重排 36 个 .py,把 `authors: tuple[str, ...]        # 注释`
+这类刻意对齐压成两空格。项目的可读性很大程度靠手工排版,不值得为「标准」
+牺牲,因此不做全库重排——格式一致性交给 `ruff check` 的 lint 层即可。
+
+它还有个更危险的副作用:会连 `docs/` 与 README 里的 Python 片段一起重排,
+既改掉文档中的示例代码,又掩盖「文档示例与当前实现故意不一致」这类信息。
+已在 `pyproject.toml` 里用 `extend-exclude = ["*.md"]` 挡住。
