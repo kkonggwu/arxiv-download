@@ -412,5 +412,154 @@ class TestForeignObjectFlattening(unittest.TestCase):
         ET.fromstring(markup)          # 转义错了这里就会炸
 
 
+class TestPictureMarkupRobustness(unittest.TestCase):
+    """采集内联插图时,结束标签的大小写必须与起始标签严格配对。
+
+    HTMLParser 把标签名转小写后才交给回调,所以结束标签的大小写只能靠栈里
+    记的原文还原。栈一旦被搅乱,还原就失败,拼出 </clippath> 这种小写闭合
+    标签——SVG 是大小写敏感的,整份 .svg 就成了非法 XML。实测 2501.12948 的
+    A2.SS2.p1.pic1 就是这么坏的,而当时测试全绿。
+
+    这里用 clipPath 做探针:foreignObject 会被扁平化掉,看不出大小写对不对;
+    clipPath / linearGradient 这类驼峰元素会原样留在产物里,是唯一能验证的
+    观测点。
+    """
+
+    def _markup(self, body):
+        html = wrap('<figure><svg id="p" class="ltx_picture">'
+                    + body + "</svg></figure>")
+        return [t for k, t in parse_blocks(html) if k == "svg"][0].partition("\t")[2]
+
+    def test_void_element_does_not_lowercase_the_next_close_tag(self):
+        # <br> 是空元素,没有结束标签。它压在栈顶时会挡住后面 </clipPath> 的
+        # 配对,把它退化成 </clippath>。实测里出现的是 <br class="ltx_break">。
+        markup = self._markup('<clipPath id="c"><br class="ltx_break">'
+                              "<rect/></clipPath>")
+        self.assertIn("</clipPath>", markup)
+        self.assertNotIn("</clippath>", markup)
+        ET.fromstring(markup)          # 大小写配错这里就会炸
+
+    def test_img_void_element_does_not_break_pairing(self):
+        markup = self._markup('<clipPath id="c"><img src="y.png">'
+                              "<rect/></clipPath>")
+        self.assertIn("</clipPath>", markup)
+        ET.fromstring(markup)
+
+    def test_unclosed_trailing_element_does_not_break_pairing(self):
+        # LaTeXML 常有未闭合的 <span>。它压在栈顶时不能只看栈顶,要往下找到
+        # 真正的 clipPath,并把它上面的元素视为隐含闭合。
+        markup = self._markup('<clipPath id="c"><span>dangling</clipPath>')
+        self.assertIn("</clipPath>", markup)
+        self.assertNotIn("</clippath>", markup)
+        ET.fromstring(markup)
+
+    def test_linear_gradient_keeps_its_case_too(self):
+        markup = self._markup(
+            '<linearGradient id="g"><br><stop offset="0"/></linearGradient>')
+        self.assertIn("</linearGradient>", markup)
+        self.assertNotIn("</lineargradient>", markup)
+        ET.fromstring(markup)
+
+    def test_void_element_is_emitted_self_closed(self):
+        # HTML 写法 <br> 在 XML 里没有结束标签,后面所有标签都会被当成它的
+        # 子节点,整份 .svg 报 mismatched tag。补成 <br/> 才合法。
+        markup = self._markup('<br class="ltx_break"><rect/>')
+        self.assertIn('<br class="ltx_break"/>', markup)
+        ET.fromstring(markup)
+
+    def test_already_self_closed_void_element_is_left_alone(self):
+        markup = self._markup('<br class="ltx_break"/>')
+        self.assertIn('<br class="ltx_break"/>', markup)
+        self.assertNotIn("/></br>", markup)
+
+    def test_unclosed_element_gets_an_implicit_close_tag(self):
+        # <span> 没闭合时补上 </span>,否则会留下 <span>x</clipPath> 这种
+        # 缺结束标签的非法标记
+        markup = self._markup('<clipPath id="c"><span>dangling</clipPath>')
+        self.assertIn("</span></clipPath>", markup)
+        ET.fromstring(markup)
+
+
+class TestFlowTextPictures(unittest.TestCase):
+    """有些「图」其实是排版好的正文——prompt 模板、清单、算法伪码。
+
+    实测 2501.12948 的 A2.SS2.p1.pic1:一个 foreignObject 里装了 7 段共
+    1729 字的提示词模板。这类内容不能按图形处理:
+
+      * 转成 <text> 没法折行,一行几十上百字符会横向溢出到框外;
+      * _fo_plain 只取第一个 alttext,整块正文会被压成一个 "\\gg"。
+
+    所以判定为正文图时降级成 verbatim 文本块——完整、可选中、可翻译。
+    """
+
+    TEMPLATE = (
+        '<foreignObject style="--ltx-fo-width:44.07em;font-size:10pt;"'
+        ' transform="matrix(1 0 0 -1 0 391.51)" width="609.8" height="394.97">'
+        '<span class="ltx_foreignobject_container">'
+        '<span class="ltx_foreignobject_content">'
+        '<span class="ltx_inline-block ltx_minipage" style="width:44.07em;">'
+        '<span class="ltx_p"><span class="ltx_text">'
+        "Please act as an impartial judge and evaluate the quality of the "
+        "responses provided by two AI assistants to the user prompt below. "
+        "Begin your evaluation by generating your own answer to the prompt, "
+        "and provide it before judging any of the candidate answers."
+        '<br class="ltx_break">Assistant A is significantly better: '
+        '[[A<math alttext="\\gg"><semantics><mo>\u226b</mo>'
+        '<annotation encoding="application/x-tex">\\gg</annotation>'
+        "</semantics></math>B]]"
+        "</span></span></span></span></foreignObject>")
+
+    SHORT_BLOCK = (
+        '<foreignObject style="font-size:9pt;"'
+        ' transform="matrix(1 0 0 -1 0 9)" width="30" height="9">'
+        '<span class="ltx_inline-block ltx_minipage">'
+        '<span class="ltx_p"><span class="ltx_text">too short to be prose'
+        "</span></span></span></foreignObject>")
+
+    LEGEND = ('<foreignObject style="font-size:9pt;"'
+              ' transform="matrix(1 0 0 -1 0 9)" width="30" height="9">'
+              '<span class="ltx_text">first<br class="ltx_break">second</span>'
+              "</foreignObject>")
+
+    def _blocks(self, body):
+        return parse_blocks(wrap('<figure><svg id="p" class="ltx_picture">'
+                                 + body + "</svg></figure>"))
+
+    def test_prompt_template_becomes_a_verbatim_block(self):
+        kinds = [k for k, _ in self._blocks(self.TEMPLATE)]
+        self.assertEqual(kinds, ["verbatim"])
+
+    def test_flow_text_keeps_every_line(self):
+        text = [t for k, t in self._blocks(self.TEMPLATE) if k == "verbatim"][0]
+        self.assertIn("Please act as an impartial judge", text)
+        self.assertIn("Assistant A is significantly better", text)
+        self.assertEqual(text.count("\n"), 1)      # 一个 <br> 断成两行
+
+    def test_inline_math_shows_as_a_glyph_not_latex_source(self):
+        text = [t for k, t in self._blocks(self.TEMPLATE) if k == "verbatim"][0]
+        self.assertIn("\u226b", text)
+        self.assertNotIn("\\gg", text)             # 别把 LaTeX 源码漏给读者
+
+    def test_flow_text_carries_no_svg_markup(self):
+        text = [t for k, t in self._blocks(self.TEMPLATE) if k == "verbatim"][0]
+        for junk in ("<span", "<br", "foreignObject", "ltx_"):
+            self.assertNotIn(junk, text)
+
+    def test_chart_labels_still_produce_an_svg(self):
+        # 只有单行标签、文字量很小,是普通插图,不能误判成正文
+        kinds = [k for k, _ in self._blocks(self.LEGEND)]
+        self.assertEqual(kinds, ["svg"])
+
+    def test_short_text_block_stays_an_svg(self):
+        # 有 minipage 结构但文字太少,说明它只是图里的附属说明
+        kinds = [k for k, _ in self._blocks(self.SHORT_BLOCK)]
+        self.assertEqual(kinds, ["svg"])
+
+    def test_mixed_picture_is_not_downgraded(self):
+        # 一张图里既有图形标签又有正文块时,不整体降级,否则图形会丢
+        kinds = [k for k, _ in self._blocks(self.TEMPLATE + self.LEGEND)]
+        self.assertEqual(kinds, ["svg"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

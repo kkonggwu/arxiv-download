@@ -19,6 +19,7 @@
 
 import re
 import urllib.parse
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from ..config import Settings
@@ -33,6 +34,20 @@ FENCE_RE = re.compile(r"\s*(`{3,}|~{3,})")
 # 真实标记通过 inline_svgs 字典带进来。用伪协议而不是 data: URI,是为了让
 # 正文里的链接保持一行短链接——把几十 KB 的 SVG 塞进 Markdown 会让文件没法读。
 INLINE_PREFIX = "inline-svg:"
+
+
+def is_well_formed(markup: str) -> bool:
+    """内联插图的标记是不是合法 XML。
+
+    解析器的输入是脏 HTML,大小写配对、未闭合标签都可能出岔子。这里只做
+    一次廉价校验,把「浏览器打不开的 .svg」变成一条看得见的日志——上一轮
+    10 张图全是非法 XML 而测试全绿,就是少了这么一道闸。
+    """
+    try:
+        ET.fromstring(markup)
+    except ET.ParseError:
+        return False
+    return True
 
 
 def asset_relpath(abs_url: str) -> Path:
@@ -72,6 +87,8 @@ def localize_images(lines: list[str], arxiv_id: str, base: str,
         markup = (inline_svgs or {}).get(url)
         if not markup:
             return ""
+        if not is_well_formed(markup):
+            log(f"  ! 内联插图不是合法 XML,照写但可能无法渲染: {url}")
         rel = Path("inline") / f"{sanitize(url[len(INLINE_PREFIX):])}.svg"
         dest = dest_root / rel
         local = f"../assets/{arxiv_id}/{rel.as_posix()}"

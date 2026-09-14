@@ -29,6 +29,50 @@ def _start_name(raw: str) -> str:
     return m.group(1) if m else ""
 
 
+# HTML 的空元素:有起始标签但没有结束标签。采集内联插图时**不能**把它们
+# 压栈——它们永远等不到配对的结束标签,会一直压在栈顶,把后面真正的配对
+# 全部挡掉。实测 2501.12948 的 A2.SS2.p1.pic1 里 9 个 <br class="ltx_break">
+# 就是这么让 </foreignObject> 退化成小写、产出非法 XML 的。
+VOID_TAGS = frozenset({
+    "area", "base", "br", "col", "embed", "hr", "img", "input",
+    "link", "meta", "param", "source", "track", "wbr",
+})
+
+
+def _self_close(raw: str) -> str:
+    """把 `<br class="x">` 补成 `<br class="x"/>`。
+
+    空元素的 HTML 写法在 XML 里是非法的:没有结束标签,后面所有标签都会被
+    当成它的子节点,整份 .svg 报 mismatched tag。补成自闭合既过得了 XML
+    校验,渲染语义也不变(这些标签只出现在 foreignObject 里,而那块内容
+    最终会被扁平化或整块降级)。
+    """
+    stripped = raw.rstrip()
+    if stripped.endswith("/>"):
+        return raw
+    return stripped[:-1].rstrip() + "/>"
+
+
+def _close_names(stack: list[str], tag: str) -> list[str]:
+    """给结束标签找回原始大小写,并补上压在它上面的未闭合元素。
+
+    返回要依次写出的结束标签名,可能不止一个:HTML 里未闭合的行内标签很
+    常见(LaTeXML 的 <span> 就常常不闭合)。只写一个 </clipPath> 会留下
+    `<span>x</clipPath>` 这种缺结束标签的非法标记;把隐含闭合的补上才是
+    忠实还原。
+
+    只比对栈顶不够稳:栈顶一旦不是要找的标签,配对就会失败并退化成小写
+    标签名。所以从栈顶往下找。真的找不到对应起始标签时,原样返回(小写)
+    交给下游。
+    """
+    for i in range(len(stack) - 1, -1, -1):
+        if stack[i].lower() == tag:
+            names = list(reversed(stack[i:]))     # 隐含闭合的排在前
+            del stack[i:]
+            return names
+    return [tag]
+
+
 SVG_NS = 'xmlns="http://www.w3.org/2000/svg"'
 
 # 基线在文本框内的位置(单位:em)。不是拍脑袋定的:对着原始内联渲染做像素级
@@ -36,7 +80,7 @@ SVG_NS = 'xmlns="http://www.w3.org/2000/svg"'
 # 0.60 相差 0.1%,视为并列)。换公式前请重跑标定。
 BASELINE_RATIO = 0.6
 
-_FOREIGN = re.compile(r"<foreignObject\b([^>]*)>(.*?)</foreignObject>", re.S)
+_FOREIGN = re.compile(r"<foreignObject\b([^>]*)>(.*?)</foreignObject>", re.S | re.I)
 _MATRIX = re.compile(r"matrix\(([^)]*)\)")
 _FONT_SIZE = re.compile(r"font-size:([\d.]+)pt")
 _ALT_TEXT = re.compile(r'alttext="([^"]*)"')
@@ -44,6 +88,50 @@ _ANY_TAG = re.compile(r"<[^>]+>")
 # 内层 span 常常再缩一次字号,实测 2201.11903 上有 90% 与 80% 两种。
 # 漏掉它文字会整体偏大,密排的刻度/图例就叠在一起。
 _FO_SCALE = re.compile(r"font-size:\s*([\d.]+)%")
+_BR = re.compile(r"<br\b[^>]*>", re.I)
+_MATH = re.compile(r"<math\b([^>]*)>(.*?)</math>", re.S | re.I)
+_ANNOTATION = re.compile(r"<annotation\b.*?</annotation>", re.S | re.I)
+
+# 判为「正文图」所需的纯文本量。实测样本是 1729 字,离阈值有 8 倍余量;
+# 图表图例/坐标轴标签通常在几十字以内,不会误触。
+MIN_FLOW_CHARS = 200
+
+
+def _fo_is_flow(inner: str) -> bool:
+    """判断 foreignObject 装的是「正文」还是「图形标签」。
+
+    LaTeXML 的图表标签是零散的单行文本(刻度、图例、子图标题);而有些
+    「图」其实是排版好的文本块——prompt 模板、清单、算法伪码,外层套
+    ltx_minipage,内部用 <br> 或 ltx_p 分段。实测 2501.12948 的
+    A2.SS2.p1.pic1 就是这样一张 7 段、1729 字的提示词模板。
+
+    两个条件都要满足,是为了不误伤:只看 <br> 会把「图例里换了一行」的
+    图表判成正文,整张图降级成文本、图形全丢;只看结构标记又可能把图里
+    一小段说明文字当成正文。要求纯文本量足够大,才说明文字是这张图的
+    主体,而不是附属标签。
+    """
+    low = inner.lower()
+    if "ltx_minipage" not in low and low.count("<br") < 3:
+        return False
+    return len(_fo_flow_text(inner)) >= MIN_FLOW_CHARS
+
+
+def _fo_flow_text(inner: str) -> str:
+    """取正文块的全部文字:<br> 还原成换行,行内公式取其可见字形。"""
+    def math_rep(m: re.Match) -> str:
+        # 正文里的行内公式,<mo> 里是可直接显示的字符(≫ > =);退而求其次
+        # 才用 alttext,那是 LaTeX 源码(\gg),给读者看不如字形直观。
+        body = _ANNOTATION.sub("", m.group(2))
+        plain = re.sub(r"\s+", "", _ANY_TAG.sub("", body))
+        if plain:
+            return plain
+        alt = _ALT_TEXT.search(m.group(1))
+        return alt.group(1) if alt else ""
+
+    text = _MATH.sub(math_rep, inner)
+    text = html.unescape(_ANY_TAG.sub("", _BR.sub("\n", text)))
+    lines = [re.sub(r"[ \t]+", " ", ln).strip() for ln in text.split("\n")]
+    return "\n".join(lines).strip()
 
 
 def _fo_plain(inner: str) -> str:
@@ -100,6 +188,20 @@ def _flatten_foreign_objects(markup: str) -> str:
     return _FOREIGN.sub(rep, markup)
 
 
+def _flow_text(markup: str) -> str:
+    """整张图若是「正文型」,返回它的文字;否则返回空串。
+
+    只在**所有** foreignObject 都是正文型时才判定成立。混合插图(有图形
+    又有文本框)不在这里降级,免得为了保住文字把图形丢掉——那种图仍走
+    SVG 路径,正文部分由 _flatten_foreign_objects 尽量还原。
+    """
+    objects = _FOREIGN.findall(markup)
+    if not objects or not all(_fo_is_flow(inner) for _, inner in objects):
+        return ""
+    return "\n\n".join(
+        t for t in (_fo_flow_text(inner) for _, inner in objects) if t)
+
+
 def _ensure_namespace(markup: str) -> str:
     """给根 <svg> 补上命名空间声明。
 
@@ -152,11 +254,12 @@ class PaperHTMLParser(HTMLParser):
     五类特殊处理:
       - <math> 用其 alttext 以 $...$ 形式内联,避免公式变成乱码
       - 跳过 script/style 与参考文献(ltx_bibliograph)
-      - 插图有两条路:<img>/<object type="image/*"> 取 src 存 URL;
+      - 插图有三条路:<img>/<object type="image/*"> 取 src 存 URL;
         <svg class="ltx_picture"> 没有 src,只能把标记原样存下来
-        (见 _flush_svg 与 _svg_parts)。存下来时还要把 <foreignObject>
-        里的 HTML/MathML 文字转成原生 <text>,否则抽成独立文件后文字全丢
-        (见 _flatten_foreign_objects)
+        (见 _flush_svg 与 _svg_parts);若这张图其实是排版好的正文
+        (prompt 模板之类),则降级成 verbatim 文本块。SVG 路径上还要把
+        <foreignObject> 里的 HTML/MathML 文字转成原生 <text>,否则抽成
+        独立文件后文字全丢(见 _flatten_foreign_objects)
       - 图注(figcaption)加【图注】前缀保留为独立段落
       - 表格分三种走法:真表格渲染成 Markdown 表(render_table);单列表格
         其实是 prompt 模板/清单,转代码块(render_code_block);
@@ -208,8 +311,12 @@ class PaperHTMLParser(HTMLParser):
         # 用 get_starttag_text() 拿原文,属性里的实体、引号风格都保持原样。
         if self._svg_parts is not None:
             raw = self.get_starttag_text()
-            self._svg_parts.append(raw)
-            self._svg_stack.append(_start_name(raw))
+            if tag in VOID_TAGS:
+                # 空元素要补成自闭合,否则 XML 里没有结束标签可配
+                self._svg_parts.append(_self_close(raw))
+            else:
+                self._svg_parts.append(raw)
+                self._svg_stack.append(_start_name(raw))
             if tag == "svg":            # 嵌套 <svg>(LaTeXML 的子面板)
                 self._svg_depth += 1
             return
@@ -320,11 +427,8 @@ class PaperHTMLParser(HTMLParser):
     def handle_endtag(self, tag):
         if self._svg_parts is not None:   # 采集内联插图:补结束标签
             # 结束标签名用栈里存的原始大小写,不能用回调给的 tag(已被转小写)。
-            # 只在栈顶确实对得上时才弹,防止 HTML 不闭合时错配。
-            name = tag
-            if self._svg_stack and self._svg_stack[-1].lower() == tag:
-                name = self._svg_stack.pop()
-            self._svg_parts.append(f"</{name}>")
+            for name in _close_names(self._svg_stack, tag):
+                self._svg_parts.append(f"</{name}>")
             if tag == "svg":
                 self._svg_depth -= 1
                 if self._svg_depth <= 0:
@@ -368,14 +472,24 @@ class PaperHTMLParser(HTMLParser):
         self._buf += data
 
     def _flush_svg(self):
-        """内联插图采集完成:存成 ("svg", "名字\\t标记") 块。
+        """内联插图采集完成,按内容分两条路出去。
 
-        名字取 <svg id>(如 S3.F4.pic1),天然唯一且与来源对得上;
-        services 层据此落成 assets/<id>/inline/<名字>.svg。
+        正文型插图(foreignObject 里是排版好的文本,如 prompt 模板)走
+        ("verbatim", 文字):这类内容转成 <text> 既没法折行(几十个字符一行
+        会横向溢出到框外),又会因为 _fo_plain 只取第一个 alttext 而把整块
+        正文压成一个字符,当文本块给出反而完整、可选中、可翻译。
+
+        普通插图走 ("svg", "名字\\t标记"),名字取 <svg id>(如 S3.F4.pic1),
+        天然唯一且与来源对得上;services 层据此落成
+        assets/<id>/inline/<名字>.svg。
         """
-        markup = _ensure_namespace(
-            _flatten_foreign_objects("".join(self._svg_parts or [])))
+        parts = "".join(self._svg_parts or [])
         self._svg_parts, self._svg_depth, self._svg_stack = None, 0, []
+        flow = _flow_text(parts)
+        if flow:
+            self.blocks.append(("verbatim", flow))
+            return
+        markup = _ensure_namespace(_flatten_foreign_objects(parts))
         name = sanitize(self._svg_id) or "picture"
         if markup:
             self.blocks.append(("svg", f"{name}\t{markup}"))
