@@ -3,13 +3,41 @@ name: tests
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 jobs:
+  # 矩阵覆盖两端:最低支持的 3.11 与最新的 3.13,以及两个操作系统。
+  # Windows 不是凑数——项目里有平台专属的代码路径(控制台 GBK 兜底、
+  # Path.replace 的原子性、写文件的换行符),只在 Linux 上跑等于没测过。
   unittest:
+    strategy:
+      fail-fast: false          # 一个平台挂了,也要能看到其他平台的结果
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.11", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: 跑单元测试(零依赖,全程离线)
+        run: python -m unittest discover -s tests -t . -v
+
+  # 测试之外的两件事:风格检查与打包。pyproject 里配了 ruff 规则,
+  # 但配了不跑等于没配——首次接入时它报出了 33 个问题。
+  lint-and-package:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-      - run: python -m unittest discover -s tests -v
+          python-version: "3.13"
+      - name: 安装(含 dev 依赖,顺带验证 extras 声明可用)
+        run: pip install -e ".[dev]"
+      - name: 代码风格
+        run: ruff check .
+      - name: 入口冒烟测试
+        run: |
+          papers --help
+          python -m paperkit --help
