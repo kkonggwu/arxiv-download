@@ -49,7 +49,12 @@ def fetch_metadata(arxiv_id: str, settings: Settings | None = None) -> dict | No
         return {"title": title, "authors": authors,
                 "year": published or "unknown", "id": arxiv_id}
     except Exception as e:
-        log(f"  ! 元数据获取失败({e})")
+        # 429 是可重试的限流,与「论文不存在」性质不同:前者等几分钟再来就行,
+        # 后者等多久都没用。日志里说清楚,否则用户不知道该等还是该放弃。
+        if getattr(e, "code", None) == 429:
+            log("  ! arXiv 元数据接口限流(429),稍后重试即可")
+        else:
+            log(f"  ! 元数据获取失败({e})")
         return None
 
 

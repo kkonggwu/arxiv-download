@@ -4,7 +4,10 @@
 `from .http import http_get` 绑定了名字,查找发生在它自己的命名空间里。
 """
 
+import io
 import unittest
+import urllib.error
+from contextlib import redirect_stdout
 from unittest import mock
 
 from tests.helpers import bootstrap  # noqa: F401
@@ -65,6 +68,31 @@ class TestFetchMetadata(unittest.TestCase):
                                return_value=ATOM_XML.encode()) as g:
             arxiv_api.fetch_metadata("1706.03762", settings)
         self.assertEqual(g.call_args.kwargs.get("proxy"), "http://127.0.0.1:7897")
+
+    def test_rate_limit_is_reported_distinctly(self):
+        """429 是可重试的限流,日志不能和「论文不存在」混为一谈。
+
+        两者都返回 None,但用户该做的事完全不同:限流等几分钟再来,
+        不存在等多久都没用。实测 export.arxiv.org 会持续返回 429。
+        """
+        err = urllib.error.HTTPError("http://x", 429, "Too Many Requests",
+                                     {}, None)
+        buf = io.StringIO()
+        with mock.patch.object(arxiv_api, "http_get", side_effect=err), \
+             redirect_stdout(buf):
+            self.assertIsNone(arxiv_api.fetch_metadata("2201.11903"))
+        out = buf.getvalue()
+        self.assertIn("429", out)
+        self.assertIn("限流", out)
+
+    def test_other_errors_keep_the_generic_message(self):
+        buf = io.StringIO()
+        with mock.patch.object(arxiv_api, "http_get",
+                               side_effect=OSError("unreachable")), \
+             redirect_stdout(buf):
+            self.assertIsNone(arxiv_api.fetch_metadata("1706.03762"))
+        self.assertIn("元数据获取失败", buf.getvalue())
+        self.assertNotIn("限流", buf.getvalue())
 
 
 class TestFetchPaperHtml(unittest.TestCase):

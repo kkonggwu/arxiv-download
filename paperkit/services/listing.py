@@ -20,12 +20,15 @@ def paper_rows(reg: dict, settings: Settings | None = None) -> list[str]:
     rows = []
     for p in reg["papers"]:
         cat = p.get("category", "未分类")
+        # ◈ 与 ✓ 是两个独立维度:元数据没补全不等于没生成过对照材料
+        # (元数据接口限流时就会这样,实测过 2201.11903)。所以先算 ◈,
+        # 再决定走「待补全元数据」还是正常行。
+        bi = "◈" if is_generated(p, s) else " "
         if "file" not in p:          # 元数据还没补全的条目
-            rows.append(f" [  ] {cat:<10} {p['id']} (待补全元数据)")
+            rows.append(f" [ {bi}] {cat:<10} {p['id']} (待补全元数据)")
             continue
         path = s.out_dir / sanitize(cat) / p["file"]
         mark = "✓" if path.exists() else " "
-        bi = "◈" if is_generated(p, s) else " "
         rows.append(f" [{mark}{bi}] {cat:<10} {p['file']}")
     return rows
 

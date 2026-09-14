@@ -101,6 +101,22 @@ class TestListMode(unittest.TestCase):
         _, out = capture(run, ["--list"], env={}, base_dir=self.root)
         self.assertIn("[ ◈]", out)
 
+    def test_diamond_shows_even_when_metadata_is_missing(self):
+        """元数据没补全 ≠ 没生成过对照材料——两个维度必须分开看。
+
+        元数据接口限流时条目只有 id + category,但 --bilingual 照样能生成
+        (它只要 HTML)。此前这种情况 --list 不显示 ◈,会让人以为白跑一趟。
+        """
+        md = self.root / "papers" / "双语" / "x.md"
+        md.parent.mkdir(parents=True)
+        md.write_text("# x", encoding="utf-8")
+        self.store.save({"papers": [
+            {"id": "2201.11903", "category": "推理前沿",
+             "bilingual": "papers/双语/x.md"}]})
+        _, out = capture(run, ["--list"], env={}, base_dir=self.root)
+        self.assertIn("待补全元数据", out)
+        self.assertIn("[ ◈]", out)
+
 
 class TestBilingualMode(unittest.TestCase):
     def setUp(self):
