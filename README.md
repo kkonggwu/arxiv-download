@@ -56,7 +56,7 @@ pip install -e ".[dev]"   # 额外装 pytest / ruff
 # 下载登记表中所有未落盘的论文(自动跳过已存在的)
 python fetch_papers.py --all --proxy http://127.0.0.1:7897
 
-# 生成中英对照阅读材料(单篇 / 全部)
+# 生成中英对照阅读材料(单篇 / 全部;已生成的自动跳过)
 python fetch_papers.py --bilingual 2210.03629 --proxy http://127.0.0.1:7897
 python fetch_papers.py --bilingual all --proxy http://127.0.0.1:7897
 
@@ -67,8 +67,9 @@ python fetch_papers.py https://arxiv.org/abs/2405.15793 --category Agent
 # 查看清单与下载状态
 python fetch_papers.py --list
 
-# 强制重新下载
+# 强制重新下载 PDF / 重新生成中英对照(对 --all 与 --bilingual 都生效)
 python fetch_papers.py --all --force --proxy http://127.0.0.1:7897
+python fetch_papers.py --bilingual all --force
 
 # 只补图片链接、不下载插图(离线场景)
 python fetch_papers.py --bilingual 2501.12948 --no-images
@@ -76,6 +77,16 @@ python fetch_papers.py --bilingual 2501.12948 --no-images
 
 装了包之后，上面所有 `python fetch_papers.py` 都可以换成 `papers`；
 `python -m paperkit` 同样等价。
+
+### 重复运行与跳过
+
+`--bilingual` 对**已生成**的论文默认跳过。判断依据是两个条件同时成立：
+登记表里有 `bilingual` 字段，**且**文件确实在磁盘上——`--list` 的 ◈ 用的是
+同一口径。所以手工删掉某篇的 md 之后再跑，它会被重新生成；想整体重做则加
+`--force`。
+
+跳过发生在联网之前，重跑 `--bilingual all` 不会为已完成的论文重复抓取 HTML。
+库越大越省事，中断之后重跑也等同于「接着跑」。
 
 ### 退出码
 

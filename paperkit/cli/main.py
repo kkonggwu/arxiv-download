@@ -18,13 +18,15 @@ from ..config import Settings
 from ..errors import PaperKitError
 from ..infra.logging import log
 from ..services import (build_bilingual, download_entry, ensure_metadata,
-                        load_registry, paper_rows, resolve_entry,
+                        is_generated, load_registry, paper_rows, resolve_entry,
                         save_registry, summary_line, target_ids)
 
 EPILOG = """示例:
   papers --all                       下载清单中所有未落盘论文
   papers 2501.12948 -c 推理前沿       添加并下载一篇
   papers --bilingual 2501.12948      生成中英对照材料
+  papers --bilingual all             生成全部(已生成的自动跳过)
+  papers -b all -f                   强制重建全部中英对照材料
   papers --list                      查看清单与状态
 
 （也可继续用 `python fetch_papers.py ...`，两者等价）"""
@@ -41,7 +43,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("papers", nargs="*", help="arXiv id 或 arxiv.org 链接")
     ap.add_argument("-c", "--category", default=None, help="新增论文的分类(目录名)")
     ap.add_argument("-a", "--all", action="store_true", help="下载清单中所有未落盘论文")
-    ap.add_argument("-f", "--force", action="store_true", help="已存在也重新下载")
+    ap.add_argument("-f", "--force", action="store_true",
+                    help="已存在也重新下载/重新生成(对 --all 与 --bilingual 都生效)")
     ap.add_argument("-l", "--list", action="store_true", help="列出清单")
     ap.add_argument("-p", "--proxy", default=None,
                     help="HTTP 代理,如 http://127.0.0.1:7897(也可用环境变量 HTTPS_PROXY)")
@@ -77,20 +80,40 @@ def _cmd_list(reg: dict, settings: Settings) -> int:
 
 
 def _cmd_bilingual(reg: dict, settings: Settings, target: str,
-                   download_images: bool) -> int:
+                   download_images: bool, force: bool) -> int:
+    """生成中英对照材料。已生成的默认跳过,只对未完成的计数与报告。
+
+    过滤放在这里而不是全交给 build_bilingual,是为了让 [i/n] 的进度反映
+    「本次真正要做多少篇」;build_bilingual 内部仍会再判断一次,以防直接
+    调用该 API 的人绕过 CLI。
+    """
     ids = target_ids(target, reg)
+    known = {p["id"]: p for p in reg["papers"]}
+    if force:
+        pending, skipped = ids, 0
+    else:
+        pending = [i for i in ids
+                   if not is_generated(known.get(i, {}), settings)]
+        skipped = len(ids) - len(pending)
+
+    if skipped:
+        log(f"跳过 {skipped} 篇已生成(-f/--force 可重建)")
+    if not pending:
+        log("没有需要生成的论文。")
+        return 0
+
     failed = 0
-    for i, pid in enumerate(ids, 1):
-        log(f"[{i}/{len(ids)}] 生成中英对照 {pid}")
+    for i, pid in enumerate(pending, 1):
+        log(f"[{i}/{len(pending)}] 生成中英对照 {pid}")
         try:
             build_bilingual(pid, reg, settings,
-                            download_images=download_images)
+                            download_images=download_images, force=force)
         except PaperKitError as e:      # 单篇失败不拖垮整批
             log(f"  ✗ 失败: {e}")
             failed += 1
-        if i < len(ids):
+        if i < len(pending):
             time.sleep(3)
-    return _summary(failed, len(ids))
+    return _summary(failed, len(pending))
 
 
 def _cmd_download_all(reg: dict, settings: Settings, force: bool) -> int:
@@ -171,7 +194,8 @@ def run(argv: list[str] | None = None, env: dict | None = None,
 
     # ---- 模式二:--bilingual,生成中英对照材料 ----
     if args.bilingual:
-        return _cmd_bilingual(reg, settings, args.bilingual, not args.no_images)
+        return _cmd_bilingual(reg, settings, args.bilingual,
+                              not args.no_images, args.force)
 
     # ---- 模式三:--all,批量补齐 PDF ----
     if args.all:

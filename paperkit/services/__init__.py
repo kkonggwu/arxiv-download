@@ -5,7 +5,7 @@
     services **不得**依赖 cli
 """
 
-from .bilingual import build_bilingual, target_ids
+from .bilingual import build_bilingual, is_generated, target_ids
 from .download import (download_entry, download_pdf, ensure_metadata,
                        resolve_entry)
 from .images import asset_relpath, localize_images
@@ -16,7 +16,7 @@ from .registry import load_registry, save_registry
 download_paper = download_pdf
 
 __all__ = [
-    "build_bilingual", "target_ids",
+    "build_bilingual", "is_generated", "target_ids",
     "download_paper", "download_pdf", "download_entry",
     "ensure_metadata", "resolve_entry",
     "asset_relpath", "localize_images",

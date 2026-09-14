@@ -1,8 +1,8 @@
 """生成中英对照阅读材料——本项目的核心用例。
 
-流程:登记条目 → 读缓存 → 只翻译缺的段落 → 拼装 Markdown → 下载插图 →
-回写缓存与登记表。缓存以「英文原文」为 key,所以改输出格式、加纠错词条都
-不用重新翻译,重跑秒级完成。
+流程:查是否已生成(未 force 则跳过)→ 登记条目 → 读缓存 → 只翻译缺的段落 →
+拼装 Markdown → 下载插图 → 回写缓存与登记表。缓存以「英文原文」为 key,所以
+改输出格式、加纠错词条都不用重新翻译,重跑秒级完成。
 
 设计上刻意把两件事做成可注入的:
   * translator —— 传一个满足 Translator 协议的假实现,就能零网络跑完整条链路
@@ -50,15 +50,39 @@ def _resolve_entry(arxiv_id: str, reg: dict, settings: Settings) -> dict:
     return entry
 
 
+def is_generated(entry: dict, settings: Settings | None = None) -> bool:
+    """该条目是否已生成过中英对照材料。
+
+    两个条件都要满足:登记表里有 bilingual 字段,**且**文件确实在磁盘上。
+    只看字段的话,手工删掉 md 之后仍会被判为已完成;--list 的 ◈ 用的是
+    同一口径(见 services/listing.py)。
+    """
+    s = settings or Settings()
+    rel = entry.get("bilingual")
+    return bool(rel) and (s.base_dir / Path(rel)).exists()
+
+
 def build_bilingual(arxiv_id: str, reg: dict,
                     settings: Settings | None = None,
                     translator: Translator | None = None,
-                    download_images: bool = True) -> Path | None:
-    """为一篇论文生成中英对照 Markdown,返回输出路径。"""
+                    download_images: bool = True,
+                    force: bool = False) -> Path | None:
+    """为一篇论文生成中英对照 Markdown,返回输出路径。
+
+    force=False 时,已生成过的直接跳过并返回原路径(不联网、不改登记表)。
+    这一步很要紧:抓 HTML 排在「哪些段落需要翻译」的判断之前,所以即使
+    译文全部命中缓存,每篇仍要发一次网络请求;库越大浪费越明显,中断后
+    重跑 `--bilingual all` 也无法真正「接着跑」。
+    """
     s = settings or Settings()
     entry = _resolve_entry(arxiv_id, reg, s)
 
     out_dir = s.bilingual_dir / sanitize(entry.get("category", "未分类"))
+    out_file = out_dir / f"{arxiv_id} 中英对照.md"
+    if not force and is_generated(entry, s):
+        log(f"= 跳过已生成 {out_file.relative_to(s.base_dir)}(--force 可重建)")
+        return out_file          # 刻意不建目录:跳过就什么都不该动
+
     out_dir.mkdir(parents=True, exist_ok=True)
     s.cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -67,7 +91,6 @@ def build_bilingual(arxiv_id: str, reg: dict,
                              fail_mark=s.fail_mark).load()
     if cache.pruned:
         log(f"  清理 {cache.pruned} 条历史失败缓存,本次重试")
-    out_file = out_dir / f"{arxiv_id} 中英对照.md"
 
     # 1) 抓 HTML 并解析(base 是图片基址,两个源的路径格式不同,必须一起带上)
     log(f"* 抓取 {arxiv_id} 的 HTML 版...")

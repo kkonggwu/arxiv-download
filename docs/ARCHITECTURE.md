@@ -506,13 +506,17 @@ Windows 进矩阵是因为 `sys.stdout.reconfigure`、路径分隔符、GBK 编�
 
 这些是此前评审中**刻意延后**的项，重构完成后才容易做：
 
-| 项 | 为何重构后才做 |
-|---|---|
-| 断点续传 / Range 下载 | 需要 `HttpClient` 支持自定义 header |
-| `--bilingual all` 跳过已生成 | 需要 `BilingualService` 暴露「是否已完成」查询 |
-| 版本号固定（不剥 `vN`） | 需要 `PaperEntry` 增加 `version` 字段 |
-| 引用编号可跳转 | 需要解析阶段保留 `ltx_bibliograph` 结构 |
-| 并发下载（线程池） | 需要 `Settings` 无共享可变状态 |
+| 项 | 为何重构后才做 | 状态 |
+|---|---|---|
+| `--bilingual all` 跳过已生成 | 需要 `BilingualService` 暴露「是否已完成」查询 | **已完成**（2026-09-14） |
+| 断点续传 / Range 下载 | 需要 `HttpClient` 支持自定义 header | 待做 |
+| 版本号固定（不剥 `vN`） | 需要 `PaperEntry` 增加 `version` 字段 | 待做 |
+| 引用编号可跳转 | 需要解析阶段保留 `ltx_bibliograph` 结构 | 待做 |
+| ~~并发下载（线程池）~~ | ~~需要 `Settings` 无共享可变状态~~ | **撤销** |
+
+「并发下载」一项撤销,理由是它与 §12「不做异步」自相矛盾——那里给出的理由
+(`time.sleep(0.4)` 的节流下收益接近零)对线程池同样成立,而且 arXiv 对抓取
+频率有明确要求,并发有被封 IP 的风险。这一项不该做,而不是延后做。
 
 ---
 
@@ -603,8 +607,43 @@ P0–P4 已全部落地,提交序列 `8ace343` → `aa25d78` → `9b5c643` → `
 每 20 段落盘一次,而中断正是本项目的高频场景,非原子写会留下半截 JSON 让整篇
 进度报废。已在 P0 提交中保留并补充了测试。
 
-### 后续可做(设计 §10 P5,尚未开始)
+### 后续可做(设计 §10 P5)
 
 参考文献整体跳过(`[12]` 无法回溯)、PDF 无断点续传、`vN` 被剥掉导致版本不可
-锁定、`--bilingual all` 不跳过已生成项、无 BibTeX 导出、无缓存失效/清理命令。
-现在有了分层与依赖注入,这些都比重构前好做。
+锁定、无 BibTeX 导出、无缓存失效/清理命令。现在有了分层与依赖注入,这些都
+比重构前好做。
+
+---
+
+## 附:后续变更(2026-09-14)
+
+### 已完成:`--bilingual all` 跳过已生成
+
+**动因**:`fetch_paper_html` 排在「哪些段落需要翻译」的判断之前,所以即使译文
+全部命中缓存,每篇仍要发一次网络请求。库里 23 篇时只浪费 2 次;涨到 200 篇、
+190 篇已生成时,一次 `all` 就是 200 次请求,其中 190 次纯属浪费。中断后重跑
+也无法真正「接着跑」。
+
+**实现**:
+
+- `services/bilingual.is_generated(entry, settings)` —— 要求登记表有 `bilingual`
+  字段**且**文件确实在磁盘上。`services/listing.py` 的 ◈ 改为复用它,消除两处
+  口径漂移的风险。
+- `build_bilingual(..., force=False)` —— 已生成则提前返回,不联网、不建目录、
+  不改登记表。
+- CLI:`-f/--force` 原先只作用于下载,现在同样作用于 `--bilingual`;
+  `_cmd_bilingual` 先过滤出待生成列表,使 `[i/n]` 进度反映「本次真正要做多少
+  篇」,并报告跳过数。
+
+**顺带清理**:删除 `paperkit/storage.py` —— 全项目无人 import 的兼容层
+(`infra/cache.py` 引的 `.storage` 是 `infra/storage.py`)。`tests/test_layering.py`
+里三处为它开的口子(compat 分层、`storage.py` 特判)一并移除。
+
+**测试**:155 → 162 项。其中 `test_nothing_retranslated_when_cache_is_warm` 必须
+补 `force=True` —— 它原本靠「跑第二次」验证缓存语义,加了跳过之后第二次会被提前
+拦掉,断言照样通过但覆盖已失效。绿灯掩盖覆盖失效,比红灯更危险。
+
+**踩到的坑**:本机 Git Bash 下 `git rm paperkit/storage.py` 意外删除了整个
+`paperkit/` 工作区目录(暂存区只记录了那一个文件,其余 28 个显示为未暂存的
+删除)。已用 `git checkout HEAD -- paperkit/` 完整恢复,此后改用
+`rm` + `git add -A` 记录删除。**本项目避免使用 `git rm`。**

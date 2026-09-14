@@ -139,6 +139,54 @@ class TestBilingualMode(unittest.TestCase):
                               base_dir=self.root)
         self.assertIsInstance(code, int)
 
+    def _save(self, papers):
+        RegistryStore(self.root / "papers.json").save({"papers": papers})
+
+    def _mark_done(self, name="a.md"):
+        """造出一个「登记表有字段 + 文件在磁盘上」的已生成条目。"""
+        md = self.root / "papers" / "双语" / name
+        md.parent.mkdir(parents=True, exist_ok=True)
+        md.write_text("# done", encoding="utf-8")
+        return f"papers/双语/{name}"
+
+    def test_all_skips_already_generated(self):
+        rel = self._mark_done()
+        self._save([
+            {"id": "1111.11111", "category": "经典", "bilingual": rel},
+            {"id": "2222.22222", "category": "经典"},
+        ])
+        with mock.patch("paperkit.cli.main.build_bilingual") as g, \
+             mock.patch("time.sleep"):
+            code, out = capture(run, ["-b", "all"], env={}, base_dir=self.root)
+        self.assertEqual(code, 0)
+        self.assertIn("跳过 1 篇已生成", out)
+        self.assertEqual(g.call_count, 1)              # 只做没生成的那篇
+        self.assertEqual(g.call_args.args[0], "2222.22222")
+
+    def test_nothing_to_do_when_everything_is_done(self):
+        rel = self._mark_done()
+        self._save([{"id": "1111.11111", "category": "经典",
+                     "bilingual": rel}])
+        with mock.patch("paperkit.cli.main.build_bilingual") as g, \
+             mock.patch("time.sleep"):
+            code, out = capture(run, ["-b", "all"], env={}, base_dir=self.root)
+        self.assertEqual(code, 0)
+        self.assertIn("没有需要生成的论文", out)
+        self.assertFalse(g.called)
+
+    def test_force_ignores_generated_state(self):
+        rel = self._mark_done()
+        self._save([{"id": "1111.11111", "category": "经典",
+                     "bilingual": rel}])
+        with mock.patch("paperkit.cli.main.build_bilingual") as g, \
+             mock.patch("time.sleep"):
+            code, out = capture(run, ["-b", "all", "-f"], env={},
+                                base_dir=self.root)
+        self.assertEqual(code, 0)
+        self.assertEqual(g.call_count, 1)
+        self.assertNotIn("跳过", out)
+        self.assertTrue(g.call_args.kwargs["force"])
+
 
 class TestSettingsFromCli(unittest.TestCase):
     def test_translator_flag_reaches_settings(self):

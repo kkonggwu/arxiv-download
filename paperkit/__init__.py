@@ -15,4 +15,4 @@
     from paperkit.config import Settings
 """
 
-__all__ = ["cli", "config", "domain", "errors", "infra", "services", "storage"]
+__all__ = ["cli", "config", "domain", "errors", "infra", "services"]

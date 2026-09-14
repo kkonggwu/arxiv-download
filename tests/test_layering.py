@@ -25,8 +25,6 @@ ALLOWED: dict[str, set[str]] = {
     "infra": {"infra", "domain", "config", "errors"},
     "services": {"services", "infra", "domain", "config", "errors"},
     "cli": {"cli", "services", "config", "errors"},
-    # 兼容壳:只做再导出,允许指向任意层
-    "compat": {"compat", "errors", "config", "domain", "infra", "services", "cli"},
     # 包根(__init__ / __main__):只做装配
     "root": {"root", "errors", "config", "domain", "infra", "services", "cli"},
 }
@@ -53,8 +51,6 @@ def _layer(path: Path) -> str:
         return rel.parts[0]
     if rel.name in ("__init__.py", "__main__.py"):
         return "root"
-    if rel.name == "storage.py":
-        return "compat"          # 兼容层,实现已移入 infra
     return rel.stem               # errors / config
 
 
@@ -62,9 +58,6 @@ def _layer_of_module(dotted: str) -> str:
     parts = dotted.split(".")
     if len(parts) >= 3 and parts[1] in LAYER_DIRS:
         return parts[1]
-    if len(parts) == 2:
-        name = parts[1]
-        return "compat" if name == "storage" else name
     return parts[-1]
 
 
