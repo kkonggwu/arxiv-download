@@ -138,17 +138,25 @@ ruff format .
 方向——`domain` 层若 import 了 `infra`、或调用了 `open()`/`read_text()`，
 测试直接失败。
 
+CI（`.github/workflows/tests.yml`）做两件事：`unittest` 覆盖 ubuntu / windows
+× Python 3.11 / 3.13 的四格矩阵；另一个 job 装 `.[dev]`、跑 `ruff check .`、
+再用 `papers --help` 与 `python -m paperkit --help` 冒烟两个入口。提交前把上面
+两条命令在本地跑一遍即可。
+
 ## 说明
 
 - **代理**：arXiv 直连常被阻断。`--proxy http://127.0.0.1:7897` 走 Clash Verge 的混合端口
   （端口以本机 Clash 配置为准），或设置环境变量 `HTTPS_PROXY`。
   Clash Verge GUI 关闭后核心可能停掉，重新打开 GUI 即可。
 - **文件名**：`年份 - 第一作者 et al. - 标题 [arXiv id].pdf`，元数据来自 arXiv Atom API。
-- **限流**：对 arXiv 的请求间隔 3 秒，23 篇约需 2–3 分钟。
+- **限流**：对 arXiv 的请求间隔 3 秒；元数据接口（`export.arxiv.org`）另有更严的
+  速率限制，实测会持续返回 429，此时日志会明确提示「稍后重试即可」——PDF 与 HTML
+  不受影响，元数据等接口恢复后 `--all` 会自动补全。
 - **中英对照**（`--bilingual`）：抓取论文 HTML 版（arXiv 原生，老论文自动退回 ar5iv），
   逐段翻译后生成 Markdown：英文段在上、中文对照在下（引用块），公式保留为 `$...$` LaTeX，
   图注带【图注】标记，常见章节名（Abstract 等）用固定译法，标题层级保留为 h2–h5。
-  翻译结果缓存在 `papers/双语/.cache/`，重跑只补缺；`--list` 中 `◈` 表示已生成。
+  翻译结果缓存在 `papers/双语/.cache/`，重跑只补缺；`--list` 中 `◈` 表示已生成，
+  已生成的论文在 `--bilingual all` 时会自动跳过（`--force` 可重建）。
   建议配三遍法使用：第一遍只读英文，第二遍对照校对，第三遍用英文写 3 句总结。
 - **表格与原文块**：论文里的表格会转成 Markdown 表并加 `【表格】` 标记；单列的
   `<table>`（prompt 模板、对话记录、代码清单）转成代码块并加 `【原文块】` 标记。
