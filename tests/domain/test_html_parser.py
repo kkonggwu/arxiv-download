@@ -5,7 +5,9 @@
   2. LaTeXML 的插图是 <object data> 而不是 <img src>,只认 <img> 会漏掉绝大多数图。
 """
 
+import re
 import unittest
+import xml.etree.ElementTree as ET
 
 from paperkit.domain import parse_blocks
 from tests.helpers import PARA, bootstrap, wrap  # noqa: F401
@@ -150,6 +152,264 @@ class TestImageExtraction(unittest.TestCase):
                     '<img src="fallback.png"></object>')
         imgs = [t for k, t in parse_blocks(html) if k == "image"]
         self.assertEqual(imgs, ["real.svg\t"])
+
+
+class TestInlineSvgFigures(unittest.TestCase):
+    """LaTeXML 把一部分插图直接内联成 <svg class="ltx_picture">。
+
+    这类图没有 src,早期版本把它们整片跳过——实测 2201.11903 的 11 张图
+    只抓到 4 张,漏掉的 7 张全是这种。这里把标记原样存下来交给 services 层落盘。
+    """
+
+    PIC = ('<svg id="S3.F4.pic1" class="ltx_picture ltx_centering" '
+           'viewBox="0 0 10 10"><g><path d="M 0 0 L 1 1"></path></g></svg>')
+
+    def _svgs(self, html):
+        return [t for k, t in parse_blocks(html) if k == "svg"]
+
+    def test_picture_svg_is_captured_with_its_markup(self):
+        blocks = self._svgs(wrap(f"<figure>{self.PIC}</figure>"))
+        self.assertEqual(len(blocks), 1)
+        name, _, markup = blocks[0].partition("\t")
+        self.assertEqual(name, "S3.F4.pic1")
+        self.assertTrue(markup.startswith("<svg "))
+        self.assertIn('id="S3.F4.pic1"', markup)
+        self.assertTrue(markup.endswith("</svg>"))
+        self.assertIn('<path d="M 0 0 L 1 1"></path>', markup)
+
+    def test_markup_is_rebuilt_verbatim(self):
+        # 属性原样保留,拼出来的标记必须能当独立 .svg 文件用
+        blocks = self._svgs(wrap(f"<figure>{self.PIC}</figure>"))
+        markup = blocks[0].partition("\t")[2]
+        self.assertIn('class="ltx_picture ltx_centering"', markup)
+        self.assertIn('viewBox="0 0 10 10"', markup)
+        self.assertEqual(markup.count("<svg"), markup.count("</svg>"))
+
+    def test_self_closing_child_does_not_gain_a_stray_end_tag(self):
+        # 默认的 handle_startendtag 会拆成 start+end 两次回调,
+        # 那样就会拼出 <path ... /></path> 这种非法标记
+        html = wrap('<figure><svg id="p" class="ltx_picture">'
+                    '<path d="M0 0"/><circle r="1"/></svg></figure>')
+        markup = self._svgs(html)[0].partition("\t")[2]
+        self.assertIn("<path d=\"M0 0\"/>", markup)
+        self.assertNotIn("</path>", markup)
+        self.assertNotIn("</circle>", markup)
+
+    def test_page_ui_svg_is_still_skipped(self):
+        # 页头的导航/主题按钮也是 <svg>,收进来就是垃圾
+        html = wrap('<a class="header-button toggle-icon">'
+                    '<svg role="presentation" height="1.25rem">'
+                    '<path d="M0 0"/></svg></a>'
+                    f"<p>{PARA}</p>")
+        self.assertEqual(self._svgs(html), [])
+        self.assertEqual([k for k, _ in parse_blocks(html)], ["p"])
+
+    def test_svg_without_class_is_skipped(self):
+        html = wrap('<svg viewBox="0 0 1 1"><path d="M0 0"/></svg>')
+        self.assertEqual(self._svgs(html), [])
+
+    def test_nested_svg_is_kept_whole(self):
+        html = wrap('<figure><svg id="outer" class="ltx_picture">'
+                    '<svg id="inner"><rect/></svg></svg></figure>')
+        blocks = self._svgs(html)
+        self.assertEqual(len(blocks), 1)          # 嵌套的算同一张图
+        markup = blocks[0].partition("\t")[2]
+        self.assertIn('<svg id="inner">', markup)
+        self.assertEqual(markup.count("</svg>"), 2)
+
+    def test_multiple_panels_stay_separate_in_order(self):
+        # 2201.11903 的 Figure 4 由三个面板拼成,顺序不能乱
+        html = wrap("<figure>"
+                    + "".join(f'<svg id="S3.F4.pic{i}" class="ltx_picture"/>'
+                              for i in (1, 2, 3))
+                    + "<figcaption>Figure 4: A three-panel figure.</figcaption>"
+                    "</figure>")
+        blocks = parse_blocks(html)
+        self.assertEqual([k for k, _ in blocks], ["svg", "svg", "svg", "p"])
+        names = [t.partition("\t")[0] for k, t in blocks if k == "svg"]
+        self.assertEqual(names, ["S3.F4.pic1", "S3.F4.pic2", "S3.F4.pic3"])
+        self.assertTrue(blocks[-1][1].startswith("【图注】"))
+
+    def test_url_images_and_inline_svgs_interleave_in_document_order(self):
+        html = wrap("<figure><img src=\"a.png\"></figure>"
+                    f"<figure>{self.PIC}</figure>"
+                    '<figure><object type="image/svg+xml" data="b.svg"></object></figure>')
+        self.assertEqual([k for k, _ in parse_blocks(html)],
+                         ["image", "svg", "image"])
+
+    def test_svg_inside_bibliography_is_skipped(self):
+        html = wrap('<div class="ltx_bibliograph">'
+                    '<svg id="x" class="ltx_picture"><path/></svg></div>')
+        self.assertEqual(self._svgs(html), [])
+
+    def test_svg_without_id_gets_a_fallback_name(self):
+        html = wrap('<figure><svg class="ltx_picture"><path/></svg></figure>')
+        name = self._svgs(html)[0].partition("\t")[0]
+        self.assertTrue(name)
+
+    def test_text_nodes_inside_svg_do_not_leak_into_paragraphs(self):
+        html = wrap('<figure><svg id="p" class="ltx_picture">'
+                    "<title>a label</title></svg></figure>")
+        self.assertEqual([k for k, _ in parse_blocks(html)], ["svg"])
+
+
+    def test_camel_case_tags_keep_their_case(self):
+        """SVG 是大小写敏感的,而 HTMLParser 会把标签名转小写。
+
+        实测 2201.11903 的 10 张内联图全部中招:<foreignObject>/<clipPath>
+        的结束标签被拼成 </foreignobject>,产物是非法 XML,浏览器渲染不出来。
+        """
+        html = wrap('<figure><svg id="p" class="ltx_picture">'
+                    '<defs><clipPath id="c"><path d="M0 0"/></clipPath>'
+                    '<linearGradient id="g"><stop/></linearGradient></defs>'
+                    '<textPath href="#c">x</textPath></svg></figure>')
+        markup = self._svgs(html)[0].partition("\t")[2]
+        self.assertIn("</clipPath>", markup)
+        self.assertIn("</linearGradient>", markup)
+        self.assertIn("</textPath>", markup)
+        for bad in ("</clippath>", "</lineargradient>", "</textpath>"):
+            self.assertNotIn(bad, markup)
+
+    def test_rebuilt_markup_is_well_formed_xml(self):
+        """最强的一条:拼出来的东西必须真的能当 .svg 文件解析。
+
+        上面的用例都只断言片段,漏掉了「整体不合法」这类问题——
+        大小写不匹配正是这样漏过去的。
+        """
+        html = wrap('<figure><svg id="p" class="ltx_picture" viewBox="0 0 9 9">'
+                    '<defs><clipPath id="c"><path d="M0 0"/></clipPath></defs>'
+                    '<g><foreignObject width="1" height="1">'
+                    "<span>label</span></foreignObject></g>"
+                    '<use href="#c"/></svg></figure>')
+        markup = self._svgs(html)[0].partition("\t")[2]
+        root = ET.fromstring(markup)          # 不合法会直接抛异常
+        self.assertTrue(root.tag.endswith("svg"))
+        self.assertEqual(root.get("viewBox"), "0 0 9 9")
+
+    def test_svg_namespace_is_added_for_standalone_files(self):
+        """LaTeXML 的内联图不带 xmlns(嵌在 HTML 里不需要)。
+
+        抽成独立 .svg 后缺了它浏览器就按未知 XML 处理、渲染成空白,
+        所以必须补上。
+        """
+        html = wrap('<figure><svg id="p" class="ltx_picture">'
+                    '<path d="M0 0"/></svg></figure>')
+        markup = self._svgs(html)[0].partition("\t")[2]
+        self.assertIn('xmlns="http://www.w3.org/2000/svg"', markup)
+        self.assertTrue(markup.startswith('<svg xmlns="http://www.w3.org/2000/svg"'))
+        # 补了之后仍然合法,而且原有属性一个不少
+        root = ET.fromstring(markup)
+        self.assertEqual(root.get("id"), "p")
+        self.assertEqual(root.get("class"), "ltx_picture")
+
+    def test_existing_namespace_is_not_duplicated(self):
+        html = wrap('<figure><svg id="p" class="ltx_picture" '
+                    'xmlns="http://www.w3.org/2000/svg"><path/></svg></figure>')
+        markup = self._svgs(html)[0].partition("\t")[2]
+        self.assertEqual(markup.count("xmlns="), 1)
+
+
+class TestForeignObjectFlattening(unittest.TestCase):
+    """foreignObject 必须转成原生 <text>,否则图上的文字全丢。
+
+    SVG 被 <img> 引用时浏览器进入「安全静态模式」,foreignObject 内容一律
+    不渲染。实测 2201.11903 的 10 张内联图抽成文件后,刻度、图例、标题
+    全部消失,只剩光秃秃的曲线——图形对但读不懂。
+    """
+
+    FO_MATH = ('<foreignObject style="--ltx-fo-width:1em;font-size:8.5pt;" '
+               'height="7.13" transform="matrix(1 0 0 -1 0 7.13)" width="5.88">'
+               '<span class="ltx_foreignobject_container">'
+               '<span class="ltx_foreignobject_content">'
+               '<math id="m1" alttext="20"><semantics><mn>20</mn></semantics>'
+               "</math></span></span></foreignObject>")
+
+    FO_TEXT = ('<foreignObject style="--ltx-fo-width:3.5em;font-size:9.25pt;" '
+               'height="8.51" transform="matrix(1 0 0 -1 0 8.51)" width="45.2">'
+               '<span class="ltx_foreignobject_container">'
+               '<span class="ltx_foreignobject_content">'
+               '<span class="ltx_text">Solve rate (%)</span>'
+               "</span></span></foreignObject>")
+
+    def _markup(self, *fos):
+        html = wrap('<figure><svg id="p" class="ltx_picture">'
+                    + "".join(fos) + "</svg></figure>")
+        return [t for k, t in parse_blocks(html) if k == "svg"][0].partition("\t")[2]
+
+    def test_foreign_object_is_replaced_by_text(self):
+        markup = self._markup(self.FO_MATH)
+        self.assertNotIn("foreignObject", markup)
+        self.assertIn(">20</text>", markup)
+
+    def test_math_alttext_is_preferred_over_nested_markup(self):
+        markup = self._markup(self.FO_MATH)
+        self.assertIn(">20</text>", markup)
+        self.assertNotIn("<mn>", markup)
+
+    def test_plain_span_text_is_used(self):
+        self.assertIn(">Solve rate (%)</text>", self._markup(self.FO_TEXT))
+
+    def test_flip_transform_is_kept_so_glyphs_are_upright(self):
+        """祖先 <g> 有垂直翻转,foreignObject 靠自身的翻转抵消。
+
+        换成 <text> 时必须保留同一个 transform,否则整片文字会倒过来
+        (实测第一版就是这样,标题读成了反的)。
+        """
+        markup = self._markup(self.FO_MATH)
+        self.assertIn('transform="matrix(1 0 0 -1 0 7.13)"', markup)
+
+    def test_baseline_offset_follows_the_calibrated_ratio(self):
+        # 基线 = 翻转平移量 + 0.6 × 字号,0.6 是像素级标定出来的
+        markup = self._markup(self.FO_MATH)
+        self.assertIn('y="12.23"', markup)          # 7.13 + 0.6*8.5
+
+    def test_font_size_is_carried_over(self):
+        markup = self._markup(self.FO_TEXT)
+        self.assertIn('font-size="9.25pt"', markup)
+        self.assertIn('y="14.06"', markup)          # 8.51 + 0.6*9.25
+
+    def test_inner_font_size_percentage_is_applied(self):
+        """内层 span 常带 font-size:90%/80% 的二次缩放。
+
+        漏掉它文字会整体偏大,密排的刻度和图例就叠在一起。
+        """
+        fo = ('<foreignObject style="font-size:9.25pt;" '
+              'transform="matrix(1 0 0 -1 0 8.51)">'
+              '<span class="ltx_text" style="font-size:90%;">Solve rate (%)</span>'
+              "</foreignObject>")
+        markup = self._markup(fo)
+        self.assertIn('font-size="8.325pt"', markup)      # 9.25 × 0.9
+        y = float(re.search(r'y="([\d.]+)"', markup).group(1))
+        self.assertAlmostEqual(y, 8.51 + 0.6 * 8.325, places=1)
+
+    def test_inner_font_size_80_percent_is_applied(self):
+        fo = ('<foreignObject style="font-size:10pt;" '
+              'transform="matrix(1 0 0 -1 0 10)">'
+              '<span class="ltx_text" style="font-size:80%;">LaMDA</span>'
+              "</foreignObject>")
+        self.assertIn('font-size="8pt"', self._markup(fo))
+
+    def test_object_without_position_is_dropped_not_misplaced(self):
+        # 取不到 transform/字号就不放,免得文字飘到错误的位置上
+        html = wrap('<figure><svg id="p" class="ltx_picture">'
+                    "<foreignObject><span>lost</span></foreignObject>"
+                    "</svg></figure>")
+        markup = [t for k, t in parse_blocks(html) if k == "svg"][0].partition("\t")[2]
+        self.assertNotIn("lost", markup)
+        self.assertNotIn("foreignObject", markup)
+
+    def test_result_is_still_well_formed_xml(self):
+        markup = self._markup(self.FO_MATH, self.FO_TEXT)
+        root = ET.fromstring(markup)
+        self.assertTrue(root.tag.endswith("svg"))
+        self.assertEqual(len(root.findall(".//{http://www.w3.org/2000/svg}text")), 2)
+
+    def test_special_characters_in_labels_are_escaped(self):
+        fo = ('<foreignObject style="font-size:9pt;" transform="matrix(1 0 0 -1 0 9)"'
+              '><span class="ltx_text">a &amp; b &lt;c&gt;</span></foreignObject>')
+        markup = self._markup(fo)
+        self.assertIn(">a &amp; b &lt;c&gt;</text>", markup)
+        ET.fromstring(markup)          # 转义错了这里就会炸
 
 
 if __name__ == "__main__":

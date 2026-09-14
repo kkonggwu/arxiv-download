@@ -5,9 +5,12 @@
   2. 缓存增量落盘(中断不丢已翻好的部分)。
 """
 
+import io
 import json
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
+from contextlib import redirect_stdout
 from unittest import mock
 
 from paperkit.services import bilingual
@@ -257,6 +260,74 @@ class TestBilingualSkip(unittest.TestCase):
         result, fetch = self._run()
         self.assertTrue(fetch.called)
         self.assertTrue(result.exists())
+
+
+class TestInlineSvgFigures(unittest.TestCase):
+    """端到端:内联插图必须真的落到 assets/ 并在正文里被引用。
+
+    2201.11903 的 11 张图里有 7 张是内联 <svg>,早期版本只抓到 4 张,
+    而且全程没有任何提示——这类「静默丢内容」比报错难发现得多。
+    """
+
+    PIC = ('<svg id="S0.F2.pic1" class="ltx_picture" viewBox="0 0 10 10">'
+           '<path d="M0 0 L1 1"></path></svg>')
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.settings = make_settings(self.tmp.name)
+        self.reg = {"papers": [{"id": PID, "category": "测试",
+                                "title": "A Test Paper"}]}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _run(self, html, **kwargs):
+        with mock.patch.object(bilingual, "fetch_paper_html",
+                               return_value=(html, "test", "https://x/")), \
+             mock.patch("time.sleep"):
+            return build_bilingual(PID, self.reg, self.settings,
+                                   translator=echo_translator(), **kwargs)
+
+    def _dest(self):
+        return self.settings.assets_dir(PID) / "inline" / "S0.F2.pic1.svg"
+
+    def test_inline_figure_is_written_and_referenced(self):
+        html = wrap(f"<p>{PARA}</p><figure>{self.PIC}"
+                    "<figcaption>Figure 2: A chart of results.</figcaption>"
+                    "</figure>")
+        md = self._run(html).read_text(encoding="utf-8")
+        self.assertIn(f"![S0.F2.pic1](../assets/{PID}/inline/S0.F2.pic1.svg)", md)
+        self.assertTrue(self._dest().exists())
+        self.assertIn("ltx_picture", self._dest().read_text(encoding="utf-8"))
+        # 图注照旧保留
+        self.assertIn("【图注】Figure 2", md)
+
+    def test_written_file_is_valid_svg(self):
+        """产物必须能当 .svg 解析——大小写错配曾让 10 张图全变非法 XML。"""
+        html = wrap('<figure><svg id="S0.F2.pic1" class="ltx_picture">'
+                    '<defs><clipPath id="c"><path d="M0 0"/></clipPath></defs>'
+                    "<foreignObject width=\"1\" height=\"1\">"
+                    "<span>label</span></foreignObject></svg></figure>")
+        self._run(html)
+        text = self._dest().read_text(encoding="utf-8")
+        root = ET.fromstring(text)
+        self.assertTrue(root.tag.endswith("svg"))
+        # 独立 .svg 文件必须自带命名空间,否则浏览器渲染成空白
+        self.assertIn("http://www.w3.org/2000/svg", text)
+
+    def test_block_log_reports_the_figure_count(self):
+        html = wrap(f"<figure>{self.PIC}</figure>")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            self._run(html)
+        self.assertIn("插图 1", buf.getvalue())
+
+    def test_markup_never_leaks_into_the_markdown(self):
+        # 几十 KB 的 SVG 塞进 md 会让文件没法读,正文里只该有一行短链接
+        html = wrap(f"<figure>{self.PIC}</figure>")
+        md = self._run(html).read_text(encoding="utf-8")
+        self.assertNotIn("<path", md)
+        self.assertLess(len(md), 2000)
 
 
 if __name__ == "__main__":

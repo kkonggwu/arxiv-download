@@ -116,5 +116,73 @@ class TestLocalizeImages(unittest.TestCase):
         self.assertEqual(g.call_count, 1)
 
 
+class TestInlineSvg(unittest.TestCase):
+    """内联插图:没有 URL,只能把解析器带过来的标记写成 .svg 文件。
+
+    这是 2201.11903 上漏掉 7/11 张图的根因——那 7 张都是内联 SVG,
+    既没有 src 可下载,也没有绝对地址可退回。
+    """
+
+    MARKUP = '<svg id="S3.F4.pic1" class="ltx_picture"><path d="M0 0"/></svg>'
+    KEY = "inline-svg:S3.F4.pic1"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.settings = make_settings(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _dest(self):
+        return self.settings.assets_dir(PID) / "inline" / "S3.F4.pic1.svg"
+
+    def _run(self, markup=None, **kwargs):
+        lines = [f"![S3.F4.pic1]({self.KEY})", ""]
+        svgs = None if markup is False else {self.KEY: markup or self.MARKUP}
+        return localize_images(lines, PID, BASE, self.settings,
+                               inline_svgs=svgs, **kwargs)
+
+    def test_markup_is_written_and_link_rewritten(self):
+        with mock.patch.object(images, "http_get") as g:
+            out = self._run()
+        self.assertFalse(g.called)            # 内联图不该走网络
+        self.assertEqual(
+            out[0], f"![S3.F4.pic1](../assets/{PID}/inline/S3.F4.pic1.svg)")
+        self.assertEqual(self._dest().read_text(encoding="utf-8"), self.MARKUP)
+
+    def test_unchanged_markup_is_reused(self):
+        self._run()
+        stamp = self._dest().stat().st_mtime_ns
+        self._run()
+        self.assertEqual(self._dest().stat().st_mtime_ns, stamp)
+
+    def test_changed_markup_overwrites_the_file(self):
+        self._run()
+        changed = self.MARKUP.replace("M0 0", "M9 9")
+        self._run(markup=changed)
+        self.assertIn("M9 9", self._dest().read_text(encoding="utf-8"))
+
+    def test_written_even_with_no_images_flag(self):
+        """--no-images 不该吃掉内联图:它不联网,而且没有别的来源可退回。"""
+        with mock.patch.object(images, "http_get") as g:
+            out = self._run(download=False)
+        self.assertFalse(g.called)
+        self.assertIn("../assets/", out[0])
+        self.assertTrue(self._dest().exists())
+
+    def test_missing_markup_leaves_the_link_untouched(self):
+        out = self._run(markup=False)
+        self.assertEqual(out[0], f"![S3.F4.pic1]({self.KEY})")
+        self.assertFalse(self._dest().exists())
+
+    def test_already_local_link_is_not_downloaded(self):
+        # 内联图写完后链接指向 ../assets/,不能再被当成远程图去下载
+        lines = [f"![x](../assets/{PID}/inline/S3.F4.pic1.svg)"]
+        with mock.patch.object(images, "http_get") as g:
+            out = localize_images(lines, PID, BASE, self.settings)
+        self.assertEqual(out, lines)
+        self.assertFalse(g.called)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

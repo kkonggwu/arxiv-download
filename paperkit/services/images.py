@@ -3,11 +3,16 @@
 图片统一落到 papers/双语/assets/<id>/<原相对路径>,正文用相对于 md 的
 `../assets/...` 引用——和 PDF、翻译缓存一样全本地,断网也能看图。
 
-两个必须注意的点:
+三个必须注意的点:
   * 围栏代码块内的行要跳过。代码块装的是 prompt 模板/清单原文,里面若恰好
     出现 `![x](y)` 这种字样,会被误当成图片链接改写。
   * download=False 时只把相对路径补全成绝对 URL(对应 --no-images),
     用于离线场景:不下载,但链接仍然是通的。
+  * **内联插图是例外**。LaTeXML 把一部分插图渲染成 `<svg class="ltx_picture">`
+    直接嵌在 HTML 里,它们根本没有 URL 可下载,也就没有绝对地址可退。
+    这类图的标记由解析器随块带进来(见 domain/html_parser 的 "svg" 块),
+    这里写成 assets/<id>/inline/<名字>.svg。实测 2201.11903 的 11 张图里
+    有 7 张是这种,早期版本整片丢失。
 
 单张失败时退回绝对 URL(链接至少是通的),不因为一张图失败就中断整篇。
 """
@@ -23,6 +28,11 @@ from ..infra.logging import log
 
 IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)\)")
 FENCE_RE = re.compile(r"\s*(`{3,}|~{3,})")
+
+# 内联插图用的伪协议。解析器产出的链接形如 `![S3.F4.pic1](inline-svg:S3.F4.pic1)`,
+# 真实标记通过 inline_svgs 字典带进来。用伪协议而不是 data: URI,是为了让
+# 正文里的链接保持一行短链接——把几十 KB 的 SVG 塞进 Markdown 会让文件没法读。
+INLINE_PREFIX = "inline-svg:"
 
 
 def asset_relpath(abs_url: str) -> Path:
@@ -42,21 +52,55 @@ def asset_relpath(abs_url: str) -> Path:
 
 def localize_images(lines: list[str], arxiv_id: str, base: str,
                     settings: Settings | None = None,
-                    download: bool = True) -> list[str]:
+                    download: bool = True,
+                    inline_svgs: dict[str, str] | None = None) -> list[str]:
     """就地改写 Markdown 行里的图片链接。
 
     已存在的文件直接复用,不重复请求;表格单元格里内联的图片走的是同一套
     替换,所以这里对整个 md 行做正则,而不是只处理 image 区块。
+
+    inline_svgs 是 `{"inline-svg:<名字>": "<svg>...</svg>"}`,由调用方在
+    拼装正文时收集(见 services/bilingual)。
     """
     s = settings or Settings()
     dest_root = s.assets_dir(arxiv_id)
     mapping: dict[str, str] = {}
     stats = {"new": 0, "reused": 0, "failed": 0}
 
+    def write_inline(url: str) -> str:
+        """内联插图落盘,返回相对链接;写不了就返回空串。"""
+        markup = (inline_svgs or {}).get(url)
+        if not markup:
+            return ""
+        rel = Path("inline") / f"{sanitize(url[len(INLINE_PREFIX):])}.svg"
+        dest = dest_root / rel
+        local = f"../assets/{arxiv_id}/{rel.as_posix()}"
+        try:
+            if dest.exists() and dest.read_text(
+                    encoding="utf-8", errors="replace") == markup:
+                stats["reused"] += 1
+                return local
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(markup, encoding="utf-8", newline="\n")
+            stats["new"] += 1
+            return local
+        except OSError as e:
+            log(f"  ! 内联插图写入失败 {url}: {e}")
+            stats["failed"] += 1
+            return ""
+
     def repl(match: re.Match) -> str:
         alt, url = match.group(1), match.group(2)
-        if url.startswith(("http://", "https://", "data:")):
-            return match.group(0)          # 已经是绝对地址,不动
+
+        # 内联插图放在最前面判断:它不需要网络,而且没有 URL 可退回,
+        # 所以 --no-images 也照样落盘——跳过就等于永久丢图。
+        if url.startswith(INLINE_PREFIX):
+            local = write_inline(url)
+            return f"![{alt}]({local})" if local else match.group(0)
+
+        # 已是绝对地址,或已指向本地 assets(内联插图刚写下的就是这种),都不动
+        if url.startswith(("http://", "https://", "data:", "../assets/")):
+            return match.group(0)
         if url in mapping:
             return f"![{alt}]({mapping[url]})"
 

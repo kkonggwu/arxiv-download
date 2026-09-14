@@ -21,7 +21,7 @@ from ..infra.cache import TranslationCache
 from ..infra.logging import log
 from ..infra.storage import RegistryStore, write_text_atomic
 from ..infra.translate import Translator, translate_one
-from .images import localize_images
+from .images import INLINE_PREFIX, localize_images
 
 
 def target_ids(target: str, reg: dict) -> list[str]:
@@ -99,8 +99,10 @@ def build_bilingual(arxiv_id: str, reg: dict,
     n_paras = sum(1 for k, _ in blocks if k == "p")
     n_tables = sum(1 for k, _ in blocks if k == "table")
     n_verbatim = sum(1 for k, _ in blocks if k == "verbatim")
+    n_images = sum(1 for k, _ in blocks if k in ("image", "svg"))
     log(f"  来源 {source},共 {len(blocks)} 个区块"
-        f"(正文段 {n_paras}、表格 {n_tables}、原文块 {n_verbatim})")
+        f"(正文段 {n_paras}、表格 {n_tables}、原文块 {n_verbatim}、"
+        f"插图 {n_images})")
 
     # 2) 只翻译缓存里没有的段落。失败只记在内存里、不写缓存,否则下次重跑
     #    会因为"缓存命中"而永远跳过它——一次网络抖动就留下永久疤痕。
@@ -139,6 +141,8 @@ def build_bilingual(arxiv_id: str, reg: dict,
              f"> 原文: https://arxiv.org/abs/{arxiv_id}", "",
              "> 用法:先裸读英文段,再对照下方引用块中的译文校准。", "",
              "---", ""]
+    # 内联插图的标记没法塞进 Markdown 链接,先收集起来,第 5 步落盘时取用
+    inline_svgs: dict[str, str] = {}
     for kind, text in blocks:
         if kind.startswith("h") and text.strip().lower() == title.strip().lower():
             continue  # 正文首个标题与论文标题重复,跳过
@@ -161,11 +165,19 @@ def build_bilingual(arxiv_id: str, reg: dict,
             # 只留原始相对路径,绝对化与本地化统一交给 localize_images
             src, _, alt = text.partition("\t")
             lines += [f"![{alt}]({src})", ""]
+        elif kind == "svg":
+            # 内联插图:没有 URL,把标记登记下来,链接用伪协议占位,
+            # 第 5 步由 localize_images 写成 assets/<id>/inline/<名字>.svg
+            name, _, markup = text.partition("\t")
+            key = f"{INLINE_PREFIX}{name}"
+            inline_svgs[key] = markup
+            lines += [f"![{name}]({key})", ""]
         else:
             lines += [text, "", f"> {zh}" if zh else "", ""]
 
     # 5) 图片落地:把正文里的远程图片链接下载到 assets/,换成相对路径引用
-    lines = localize_images(lines, arxiv_id, base, s, download=download_images)
+    lines = localize_images(lines, arxiv_id, base, s, download=download_images,
+                            inline_svgs=inline_svgs)
     write_text_atomic(out_file, "\n".join(lines))
 
     # 6) 回写:缓存落盘(断点续传的依据),登记表记录产出路径(--list 显示 ◈)
