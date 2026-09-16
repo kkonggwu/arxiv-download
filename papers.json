@@ -15,7 +15,8 @@
         "Illia Polosukhin"
       ],
       "year": "2017",
-      "file": "2017 - Vaswani et al. - Attention Is All You Need [1706.03762].pdf"
+      "file": "2017 - Vaswani et al. - Attention Is All You Need [1706.03762].pdf",
+      "wiki": "wiki/wiki/sources/vaswani-2017-attention-is-all-you-need.md"
     },
     {
       "id": "2005.14165",
@@ -55,7 +56,8 @@
         "Dario Amodei"
       ],
       "year": "2020",
-      "file": "2020 - Brown et al. - Language Models are Few-Shot Learners [2005.14165].pdf"
+      "file": "2020 - Brown et al. - Language Models are Few-Shot Learners [2005.14165].pdf",
+      "wiki": "wiki/wiki/sources/brown-2020-language-models-are-few-shot-learners.md"
     },
     {
       "id": "2001.08361",
@@ -74,7 +76,8 @@
         "Dario Amodei"
       ],
       "year": "2020",
-      "file": "2020 - Kaplan et al. - Scaling Laws for Neural Language Models [2001.08361].pdf"
+      "file": "2020 - Kaplan et al. - Scaling Laws for Neural Language Models [2001.08361].pdf",
+      "wiki": "wiki/wiki/sources/kaplan-2020-scaling-laws-for-neural-language-models.md"
     },
     {
       "id": "2203.02155",
@@ -103,7 +106,8 @@
         "Ryan Lowe"
       ],
       "year": "2022",
-      "file": "2022 - Ouyang et al. - Training language models to follow instructions with human feedback [2203.02155].pdf"
+      "file": "2022 - Ouyang et al. - Training language models to follow instructions with human feedback [2203.02155].pdf",
+      "wiki": "wiki/wiki/sources/ouyang-2022-instructgpt.md"
     },
     {
       "id": "2106.09685",
@@ -120,7 +124,8 @@
         "Weizhu Chen"
       ],
       "year": "2021",
-      "file": "2021 - Hu et al. - LoRA Low-Rank Adaptation of Large Language Models [2106.09685].pdf"
+      "file": "2021 - Hu et al. - LoRA Low-Rank Adaptation of Large Language Models [2106.09685].pdf",
+      "wiki": "wiki/wiki/sources/hu-2021-lora.md"
     },
     {
       "id": "2203.15556",
@@ -151,7 +156,8 @@
         "Laurent Sifre"
       ],
       "year": "2022",
-      "file": "2022 - Hoffmann et al. - Training Compute-Optimal Large Language Models [2203.15556].pdf"
+      "file": "2022 - Hoffmann et al. - Training Compute-Optimal Large Language Models [2203.15556].pdf",
+      "wiki": "wiki/wiki/sources/hoffmann-2022-training-compute-optimal-llms.md"
     },
     {
       "id": "2305.20050",

@@ -80,12 +80,12 @@ class TestListMode(unittest.TestCase):
         self.store.save({"papers": [
             {"id": "1706.03762", "category": "经典", "file": "a.pdf"}]})
         _, out = capture(run, ["--list"], env={}, base_dir=self.root)
-        self.assertIn("[  ]", out)          # 文件不在磁盘上,不该打勾
+        self.assertIn("[   ]", out)         # 文件不在磁盘上,不该打勾
 
         (self.root / "papers" / "经典").mkdir(parents=True)
         (self.root / "papers" / "经典" / "a.pdf").write_bytes(b"%PDF")
         _, out = capture(run, ["--list"], env={}, base_dir=self.root)
-        self.assertIn("[✓ ]", out)
+        self.assertIn("[✓  ]", out)
 
     def test_diamond_checks_disk_not_just_registry(self):
         md = self.root / "papers" / "双语" / "x.md"
@@ -93,12 +93,12 @@ class TestListMode(unittest.TestCase):
             {"id": "1", "category": "c", "file": "a.pdf",
              "bilingual": "papers/双语/x.md"}]})
         _, out = capture(run, ["--list"], env={}, base_dir=self.root)
-        self.assertNotIn("[ ◈]", out)       # 登记表里有,但文件不存在
+        self.assertNotIn("[ ◈ ]", out)      # 登记表里有,但文件不存在
 
         md.parent.mkdir(parents=True)
         md.write_text("# x", encoding="utf-8")
         _, out = capture(run, ["--list"], env={}, base_dir=self.root)
-        self.assertIn("[ ◈]", out)
+        self.assertIn("[ ◈ ]", out)
 
     def test_diamond_shows_even_when_metadata_is_missing(self):
         """元数据没补全 ≠ 没生成过对照材料——两个维度必须分开看。
@@ -114,7 +114,54 @@ class TestListMode(unittest.TestCase):
              "bilingual": "papers/双语/x.md"}]})
         _, out = capture(run, ["--list"], env={}, base_dir=self.root)
         self.assertIn("待补全元数据", out)
-        self.assertIn("[ ◈]", out)
+        self.assertIn("[ ◈ ]", out)
+
+    def test_hexagon_checks_disk_not_just_registry(self):
+        page = self.root / "wiki" / "sources" / "x.md"
+        self.store.save({"papers": [
+            {"id": "1", "category": "c", "file": "a.pdf",
+             "wiki": "wiki/sources/x.md"}]})
+        _, out = capture(run, ["--list"], env={}, base_dir=self.root)
+        self.assertNotIn("[  ⬡]", out)      # 登记表里有 wiki 字段,但文件不存在
+
+        page.parent.mkdir(parents=True)
+        page.write_text("# x", encoding="utf-8")
+        _, out = capture(run, ["--list"], env={}, base_dir=self.root)
+        self.assertIn("[  ⬡]", out)
+
+
+class TestWikiLinkMode(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.store = RegistryStore(self.root / "papers.json")
+        self.store.save({"papers": [{"id": "1706.03762", "category": "经典"}]})
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_marks_entry_and_persists(self):
+        code, out = capture(run, ["--wiki-link", "1706.03762",
+                                  "wiki/sources/x.md"], env={},
+                             base_dir=self.root)
+        self.assertEqual(code, 0)
+        self.assertEqual(self.store.load()["papers"][0]["wiki"],
+                         "wiki/sources/x.md")
+        self.assertIn("已标记", out)
+
+    def test_unknown_id_returns_config_error_exit(self):
+        code, out = capture(run, ["--wiki-link", "9999.99999",
+                                  "wiki/sources/x.md"], env={},
+                             base_dir=self.root)
+        self.assertEqual(code, 3)
+        self.assertIn("清单里没有", out)
+
+    def test_warns_when_page_file_missing(self):
+        code, out = capture(run, ["--wiki-link", "1706.03762",
+                                  "wiki/sources/x.md"], env={},
+                             base_dir=self.root)
+        self.assertEqual(code, 0)
+        self.assertIn("尚不存在", out)
 
 
 class TestBilingualMode(unittest.TestCase):

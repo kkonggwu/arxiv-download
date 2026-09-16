@@ -35,6 +35,9 @@
 │   └── 双语/                   # --bilingual 生成的中英对照 Markdown(同分类子目录)
 │       ├── .cache/            # 翻译缓存,按后端分文件
 │       └── assets/<id>/       # 从论文里抓下来的插图,按原路径存
+├── wiki/                      # 实验性 LLM Wiki 知识库(见 docs/WIKI-WORKFLOW.md)
+│   ├── wiki/sources|entities|concepts/   # 知识本体(入库)
+│   └── raw/sources/ · .llm-wiki/ · agent-workspace/   # 已 gitignore
 └── README.md
 ```
 
@@ -66,6 +69,9 @@ python fetch_papers.py https://arxiv.org/abs/2405.15793 --category Agent
 
 # 查看清单与下载状态
 python fetch_papers.py --list
+
+# 标记一篇论文已手动 ingest 进 LLM Wiki(--list 显示 ⬡;见 docs/WIKI-WORKFLOW.md)
+python fetch_papers.py --wiki-link 1706.03762 wiki/wiki/sources/vaswani-2017-attention-is-all-you-need.md
 
 # 强制重新下载 PDF / 重新生成中英对照(对 --all 与 --bilingual 都生效)
 python fetch_papers.py --all --force --proxy http://127.0.0.1:7897
@@ -118,6 +124,26 @@ python fetch_papers.py --bilingual 2501.12948 \
 
 新增一个后端只需在 `paperkit/infra/translate/` 写一个满足 `Translator` 协议
 的类，再在 `_BUILDERS` 里加一行。
+
+## 与 LLM Wiki 知识库的衔接
+
+仓库里的 `wiki/` 是一个实验性的 [LLM Wiki](https://github.com/nashsu/llm_wiki)
+项目——把论文蒸馏成交叉链接的知识库(实体/概念/来源页)。它与本工具是同一
+流水线的上下两层:**本工具负责「下载 + 精读」,LLM Wiki 负责「融会贯通」**。
+
+一条命令链 + 一个手动动作组成完整工作流:
+
+```bash
+papers 2501.12948 -c 推理前沿      # ① 下载 + 分类
+papers --bilingual 2501.12948     # ② 翻译成中英对照(你自己的精读文件夹)
+papers --list                     # ③a 看 ⬡ 列,找出还没进 wiki 的论文
+# ③b 手动把 PDF 复制进 wiki/raw/sources/ → 在 LLM Wiki 里 ingest 建关系
+papers --wiki-link 2501.12948 wiki/wiki/sources/xxx.md   # ③d 回填标记
+```
+
+`--list` 的三个标记:`✓` PDF 已落盘、`◈` 已生成双语、`⬡` 已进 wiki。进不进
+知识库、知识库里怎么建关系,都由你在 LLM Wiki 里手动决定——脚本只帮你跟踪
+「哪篇还没进」,不替你拍板。完整约定见 [docs/WIKI-WORKFLOW.md](docs/WIKI-WORKFLOW.md)。
 
 ## 开发
 

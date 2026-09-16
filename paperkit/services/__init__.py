@@ -10,6 +10,7 @@ from .download import download_entry, download_pdf, ensure_metadata, resolve_ent
 from .images import asset_relpath, localize_images
 from .listing import paper_rows, summary_line
 from .registry import load_registry, save_registry
+from .wiki import is_in_wiki, link_wiki
 
 # 兼容原有对外名字(原 paperkit/services.py 的 API)
 download_paper = download_pdf
@@ -21,4 +22,5 @@ __all__ = [
     "asset_relpath", "localize_images",
     "paper_rows", "summary_line",
     "load_registry", "save_registry",
+    "is_in_wiki", "link_wiki",
 ]

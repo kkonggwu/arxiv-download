@@ -13,6 +13,7 @@
 import argparse
 import sys
 import time
+from pathlib import Path
 
 from ..config import Settings
 from ..errors import PaperKitError
@@ -22,6 +23,7 @@ from ..services import (
     download_entry,
     ensure_metadata,
     is_generated,
+    link_wiki,
     load_registry,
     paper_rows,
     resolve_entry,
@@ -37,6 +39,8 @@ EPILOG = """示例:
   papers --bilingual all             生成全部(已生成的自动跳过)
   papers -b all -f                   强制重建全部中英对照材料
   papers --list                      查看清单与状态
+  papers --wiki-link 1706.03762 wiki/wiki/sources/vaswani-2017-attention-is-all-you-need.md
+                                      标记一篇已进 LLM Wiki(--list 显示 ⬡)
 
 （也可继续用 `python fetch_papers.py ...`，两者等价）"""
 
@@ -55,6 +59,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("-f", "--force", action="store_true",
                     help="已存在也重新下载/重新生成(对 --all 与 --bilingual 都生效)")
     ap.add_argument("-l", "--list", action="store_true", help="列出清单")
+    ap.add_argument("--wiki-link", nargs=2, metavar=("ID", "PAGE"),
+                    help="标记一篇论文已进 LLM Wiki:PAGE 为 source 页相对路径"
+                         "(如 wiki/wiki/sources/xxx.md),--list 显示 ⬡")
     ap.add_argument("-p", "--proxy", default=None,
                     help="HTTP 代理,如 http://127.0.0.1:7897(也可用环境变量 HTTPS_PROXY)")
     ap.add_argument("-b", "--bilingual", default=None, metavar="ID|all",
@@ -85,6 +92,23 @@ def _cmd_list(reg: dict, settings: Settings) -> int:
     for row in paper_rows(reg, settings):
         log(row)
     log(summary_line(reg))
+    return 0
+
+
+def _cmd_wiki_link(reg: dict, settings: Settings, arxiv_id: str,
+                   page_path: str) -> int:
+    """本地操作,不联网:回填 papers.json 的 wiki 字段做「已进 wiki」标记。
+
+    真正的 ingest 与关系创建在 LLM Wiki 里手动完成,这里只负责标记这一笔。
+    """
+    try:
+        link_wiki(arxiv_id, page_path, reg, settings)
+    except PaperKitError as e:
+        log(f"! {e}")
+        return 3
+    if not (settings.base_dir / Path(page_path)).exists():
+        log(f"  ! 注意:{page_path} 尚不存在,文件落盘后 --list 的 ⬡ 才亮")
+    log(f"✓ 已标记 {arxiv_id} → {page_path}")
     return 0
 
 
@@ -212,16 +236,21 @@ def run(argv: list[str] | None = None, env: dict | None = None,
     if args.list:
         return _cmd_list(reg, settings)
 
-    # ---- 模式二:--bilingual,生成中英对照材料 ----
+    # ---- 模式二:--wiki-link,回填 wiki 状态,本地操作 ----
+    if args.wiki_link:
+        return _cmd_wiki_link(reg, settings, args.wiki_link[0],
+                              args.wiki_link[1])
+
+    # ---- 模式三:--bilingual,生成中英对照材料 ----
     if args.bilingual:
         return _cmd_bilingual(reg, settings, args.bilingual,
                               not args.no_images, args.force)
 
-    # ---- 模式三:--all,批量补齐 PDF ----
+    # ---- 模式四:--all,批量补齐 PDF ----
     if args.all:
         return _cmd_download_all(reg, settings, args.force)
 
-    # ---- 模式四:位置参数,添加并下载指定论文 ----
+    # ---- 模式五:位置参数,添加并下载指定论文 ----
     return _cmd_add(reg, settings, args.papers, args.category, args.force, parser)
 
 
